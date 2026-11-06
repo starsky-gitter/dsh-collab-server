@@ -1,0 +1,16 @@
+{
+  "name": "dsh-team-context",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared AI context for DeepSeek Harness teams: individual records, on-demand recall, human review.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "hub": "node hub/server.js",
+    "smoke": "node hub/smoke.mjs",
+    "check": "node --check hub/server.js && node --check plugin/index.js && node --check plugin/client.js"
+  }
+}

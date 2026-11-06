@@ -1,0 +1,15 @@
+- insert:
+    - id: team-context
+      name: '@local/dsh-team-context'
+      config:
+        hubUrl: 'http://127.0.0.1:7420'
+        token: 'dev-token'
+        project: 'default'
+        member: ''
+        autoBrief: true
+        briefLimit: 8
+        embedded: true
+        peerPort: 7420
+        peers: []
+        primary: ''
+        expose: false
