@@ -170,8 +170,9 @@ export function apply(ctx, config) {
   function localDataDir() {
     if (cfg.dataDir) return cfg.dataDir
     const home = process.env.DSH_PROFILE_DIR || path.join(os.homedir(), '.dsh')
-    const project = String(cfg.project || 'default').replace(/[^\w.-]+/g, '_')
-    return path.join(home, 'collab-server', project)
+    // One collaboration database per profile: switching the active zone must
+    // never move the store, otherwise records and zones appear to vanish.
+    return path.join(home, 'collab-server', 'default')
   }
 
   // The embedded node authenticates this machine's own plugin with a local
@@ -409,9 +410,9 @@ export function apply(ctx, config) {
       'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
       '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
       "$d.Description = '选择要加入合作区的工作区目录'",
-      "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Set-Content -LiteralPath '" +
+      "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [System.IO.File]::WriteAllText('" +
         outFile.replace(/'/g, "''") +
-        "' -Value $d.SelectedPath }",
+        "', $d.SelectedPath, (New-Object System.Text.UTF8Encoding($false))) }",
     ].join('; ')
     try {
       await execFileAsync('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
@@ -423,7 +424,7 @@ export function apply(ctx, config) {
     }
     let dir = ''
     try {
-      dir = fs.readFileSync(outFile, 'utf8').trim()
+      dir = fs.readFileSync(outFile, 'utf8').replace(/^\uFEFF/, '').trim()
     } catch {
       dir = ''
     }
