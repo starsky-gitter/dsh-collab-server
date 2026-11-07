@@ -432,6 +432,23 @@ export async function startNode(options = {}) {
     return member ? { id: member.id, name: member.name, role: member.role || 'member' } : null
   }
 
+  const zoneRegistryFile = path.join(dataDir, 'zones-registry.json')
+  let zoneRegistry = []
+  try {
+    const raw = JSON.parse(fs.readFileSync(zoneRegistryFile, 'utf8'))
+    zoneRegistry = Array.isArray(raw.zones) ? raw.zones.filter((zone) => typeof zone === 'string' && zone) : []
+  } catch {
+    zoneRegistry = []
+  }
+  function saveZoneRegistry() {
+    fs.writeFileSync(zoneRegistryFile, JSON.stringify({ zones: zoneRegistry }, null, 2))
+  }
+  function zoneNames() {
+    const names = new Set(zoneRegistry)
+    for (const record of records.values()) names.add(record.project)
+    return [...names].sort()
+  }
+
   // --- HTTP ---------------------------------------------------------------
   function send(res, code, value) {
     const body = JSON.stringify(value)
@@ -501,6 +518,22 @@ export async function startNode(options = {}) {
       }
       const auth = authOf(req)
       if (!auth) return send(res, 401, { error: 'invalid team token' })
+
+      if (pathname === '/api/zones') {
+        if (req.method === 'GET') return send(res, 200, { zones: zoneNames() })
+        if (req.method === 'POST') {
+          if (auth.role !== 'admin') return send(res, 403, { error: 'admin only' })
+          const body = await readBody(req)
+          const name = clip(String(body.name || '').trim(), 80)
+          if (!name) return send(res, 400, { error: 'name is required' })
+          if (!zoneRegistry.includes(name)) {
+            zoneRegistry.push(name)
+            saveZoneRegistry()
+          }
+          return send(res, 201, { zones: zoneNames() })
+        }
+        return send(res, 405, { error: 'method not allowed' })
+      }
 
       if (pathname === '/api/team/members') {
         if (auth.role !== 'admin') return send(res, 403, { error: 'admin only' })

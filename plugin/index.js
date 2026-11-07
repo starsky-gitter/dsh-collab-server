@@ -780,6 +780,30 @@ export function apply(ctx, config) {
         }
         return sendJson(res, 405, { error: 'unsupported file action' })
       }
+      if (url.startsWith('/team-api/zones/available')) {
+        const target = cfg.primary ? String(cfg.primary).replace(/\/+$/, '') : await baseUrl()
+        const zoneToken = cfg.primary ? cfg.token : localSecret
+        if (req.method === 'GET') {
+          const upstream = await fetch(target + '/api/zones', { headers: { 'x-team-token': zoneToken } })
+          const data = await upstream.json().catch(() => ({}))
+          return sendJson(res, upstream.status, { zones: data.zones || [] })
+        }
+        if (req.method === 'POST') {
+          let body = {}
+          try {
+            body = JSON.parse((await readRaw(req)) || '{}')
+          } catch {
+            body = {}
+          }
+          const upstream = await fetch(target + '/api/zones', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-team-token': zoneToken },
+            body: JSON.stringify({ name: body.name }),
+          })
+          const data = await upstream.json().catch(() => ({}))
+          return sendJson(res, upstream.status, data)
+        }
+      }
       if (url === '/team-api/zones' || url.startsWith('/team-api/zones?')) {
         if (req.method === 'GET') {
           const query = new URL(url, 'http://local').searchParams

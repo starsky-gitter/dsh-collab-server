@@ -1,7 +1,7 @@
 {
   "name": "dsh-collab-server",
-  "version": "0.3.2",
-  "description": "团队共享 AI 上下文：单条记录、按需检索、文件同步、局域网身份认证�?,
+  "version": "0.4.0",
+  "description": "团队共享 AI 上下文：单条记录、按需检索、文件同步、局域网身份认证。",
   "license": "MIT",
   "keywords": [
     "dsh-plugin",

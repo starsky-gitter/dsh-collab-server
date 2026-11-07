@@ -412,13 +412,27 @@ window.__ModuleLoader__.load({
 
       async function openZones() {
         try {
-          setZoneView(await api('/zones'))
+          const [bindings, available] = await Promise.all([api('/zones'), api('/zones/available')])
+          setZoneView({ ...bindings, available: (available && available.zones) || [], newName: '' })
           setFileView(null)
           setMemberView(null)
           setSettingsView(null)
           setCreating(false)
           setSelected(null)
           setError('')
+        } catch (e) {
+          setError(String((e && e.message) || e))
+        }
+      }
+
+      async function createZone() {
+        const view = zoneView
+        const name = String((view && view.newName) || '').trim()
+        if (!name) return
+        try {
+          await api('/zones/available', { method: 'POST', body: JSON.stringify({ name }) })
+          await openZones()
+          setToast('已创建合作区 ' + name)
         } catch (e) {
           setError(String((e && e.message) || e))
         }
@@ -849,6 +863,37 @@ window.__ModuleLoader__.load({
                 ),
             h(
               'div',
+              { style: { marginTop: '18px', paddingTop: '14px', borderTop: '1px solid var(--dsw-alias-border-l1)' } },
+              h('div', { className: 'dtc-label' }, '主机上的合作区'),
+              h(
+                'div',
+                { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '6px' } },
+                '成员在会话 "..." 菜单里从这里选，选完该工作区就加入这个合作区。',
+              ),
+              (zoneView.available || []).length
+                ? zoneView.available.map((name) =>
+                    h('div', { key: name, style: { fontSize: '12px', padding: '3px 0' } }, name),
+                  )
+                : h(
+                    'div',
+                    { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } },
+                    '还没有合作区，在下面新建一个。',
+                  ),
+              h(
+                'div',
+                { className: 'dtc-row', style: { marginTop: '8px' } },
+                h('input', {
+                  className: 'dtc-input',
+                  style: { flex: 1 },
+                  placeholder: '新合作区名，例如 motor-f407',
+                  value: zoneView.newName || '',
+                  onChange: (e) => setZoneView({ ...zoneView, newName: e.target.value }),
+                }),
+                h('button', { className: 'dtc-btn', onClick: createZone }, '创建'),
+              ),
+            ),
+            h(
+              'div',
               { style: { marginTop: '16px' } },
               h('button', { className: 'dtc-btn', onClick: () => setZoneView(null) }, '关闭'),
             ),
@@ -1152,6 +1197,105 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // Zone picker: a small modal shared by the session menu and the panel.
+    let pickerState = null
+    const pickerListeners = new Set()
+    function setPicker(next) {
+      pickerState = next
+      for (const listener of pickerListeners) listener(pickerState)
+    }
+    function usePickerState() {
+      const [state, setState] = useState(pickerState)
+      useEffect(() => {
+        const listener = (value) => setState(value)
+        pickerListeners.add(listener)
+        return () => {
+          pickerListeners.delete(listener)
+        }
+      }, [])
+      return state
+    }
+
+    function ZonePicker() {
+      const state = usePickerState()
+      if (!state) return null
+      const zones = Array.isArray(state.zones) ? state.zones : []
+      async function pick(name) {
+        try {
+          const res = await fetch('/team-api/zones', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: state.sessionId, project: name }),
+          })
+          if (!res.ok) throw new Error('HTTP ' + res.status)
+          setPicker(null)
+          if (typeof state.onDone === 'function') state.onDone(name)
+        } catch (error) {
+          setPicker({ ...state, error: '绑定失败：' + String((error && error.message) || error) })
+        }
+      }
+      return h(
+        'div',
+        {
+          style: {
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,.35)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+          },
+          onClick: () => setPicker(null),
+        },
+        h(
+          'div',
+          {
+            style: {
+              minWidth: '320px',
+              maxWidth: '480px',
+              background: 'var(--dsw-alias-bg-overlay)',
+              border: '1px solid var(--dsw-alias-border-l2)',
+              borderRadius: '12px',
+              padding: '16px',
+              boxShadow: '0 12px 40px rgba(0,0,0,.3)',
+            },
+            onClick: (event) => event.stopPropagation(),
+          },
+          h('div', { style: { fontSize: '15px', fontWeight: 600, marginBottom: '4px' } }, '加入合作区'),
+          h(
+            'div',
+            { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '12px' } },
+            state.loading
+              ? '正在读取主机上的合作区…'
+              : zones.length
+                ? '选择这个工作区要加入的合作区：'
+                : '主机还没有创建合作区。先在主机面板的「合作区」里新建一个。',
+          ),
+          zones.map((name) =>
+            h(
+              'button',
+              {
+                key: name,
+                className: 'dtc-btn',
+                style: { display: 'block', width: '100%', textAlign: 'left', marginBottom: '6px' },
+                onClick: () => pick(name),
+              },
+              name,
+            ),
+          ),
+          state.error
+            ? h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' } }, state.error)
+            : null,
+          h(
+            'div',
+            { style: { display: 'flex', justifyContent: 'flex-end', marginTop: '10px' } },
+            h('button', { className: 'dtc-btn', onClick: () => setPicker(null) }, '取消'),
+          ),
+        ),
+      )
+    }
+
     function ZoneMenu(props) {
       const [state, setState] = useState('loading')
       const [hover, setHover] = useState(false)
@@ -1207,17 +1351,14 @@ window.__ModuleLoader__.load({
             if (!res.ok) throw new Error('HTTP ' + res.status)
             setZone(null)
             setState('idle')
-          } else {
-            const res = await fetch('/team-api/zones', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ sessionId: props && props.sessionId }),
-            })
-            const data = await res.json()
-            if (!res.ok) throw new Error((data && data.error) || 'HTTP ' + res.status)
-            setZone({ cwd: data.cwd, project: data.project, bound: true })
-            setState('bound')
+            dismiss()
+            return
           }
+          const res = await fetch('/team-api/zones/available')
+          const data = await res.json()
+          if (!res.ok) throw new Error((data && data.error) || 'HTTP ' + res.status)
+          setPicker({ sessionId: props && props.sessionId, zones: data.zones || [], loading: false })
+          setState('idle')
           dismiss()
         } catch {
           setState('error')
@@ -1276,6 +1417,16 @@ window.__ModuleLoader__.load({
               label: '团队共享',
             },
             TeamIcon,
+          ),
+        )
+        ctx.slots.inject('shell.overlay', () =>
+          ctx.slots.register(
+            {
+              name: 'shell.overlay',
+              id: 'collab-zone-picker',
+              order: 50,
+            },
+            ZonePicker,
           ),
         )
         ctx.slots.inject('sidebar.workspaces.session.menu.item', () =>
