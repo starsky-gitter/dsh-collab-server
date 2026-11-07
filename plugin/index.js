@@ -44,6 +44,34 @@ function lanAddress() {
   return '127.0.0.1'
 }
 
+const TEAM_SKILL = [
+  '# 团队共享上下文',
+  '',
+  '团队里每个人的 AI 都能检索一个共享记录库。你的责任是在任务收尾时，把这一轮真正可复用的结论留下一条，而不是把过程倒进去。',
+  '',
+  '## 什么时候提交',
+  '',
+  '- 定位到硬件/时序/驱动问题，并知道触发条件和规避方式。',
+  '- 做了有取舍的设计决定，且理由不明显。',
+  '- 发现某个"常识"在当前板卡/工具链上不成立。',
+  '- 确认了环境差异：某个版本、某块板、某个 SDK 补丁是必需的。',
+  '- 一条路走死了，下一个人的 AI 很可能再走一遍。',
+  '',
+  '## 什么时候不提交',
+  '',
+  '- 只是改代码、没有结论（纯实现、重命名、格式化）。',
+  '- 通用知识、网上随处可查。',
+  '- 含密钥、客户数据、完整日志原文。',
+  '- 同一结论本轮已经提交过。',
+  '',
+  '## 怎么做',
+  '',
+  '1. 先 team_recall 查重；已有就跳过，过期就 team_review 标失效。',
+  '2. 没有就 team_share，一条只讲一个结论：title 写"症状 + 条件 + 结论"；body 200–600 字，写现象、适用条件（板卡/芯片/工具链）、验证方式；scope 能填就填；evidence 写一条具体证据。',
+  '3. 没有构建或上板证据时保持 draft；有证据才设 verified。',
+  '4. 不要为了写记录额外做验证。',
+].join('\n')
+
 const PROTOCOL = [
   '团队共享上下文：任务收尾前（准备交付、结束本轮、或宣布完成之前）自检一次：',
   '这一轮是否得出了可复用的结论（硬件事实、设计取舍、踩坑教训、环境差异）？',
@@ -453,6 +481,25 @@ export function apply(ctx, config) {
       text: PROTOCOL,
     }),
   )
+
+  // Ship the checklist as a runtime skill so installing the plugin is enough;
+  // profiles that also load a filesystem skill with the same name keep theirs.
+  ctx.effect(() => {
+    const skills = ctx.get && ctx.get('skills')
+    if (!skills || typeof skills.register !== 'function') return () => {}
+    try {
+      return skills.register({
+        name: 'team-context',
+        description: '任务收尾时判断本轮是否有可复用的团队结论，并用 team_share 提交一条记录。',
+        whenToUse: '改了代码、跑过构建/烧录、定位过硬件问题，或做了设计取舍之后。',
+        source: 'runtime',
+        content: TEAM_SKILL,
+      })
+    } catch (error) {
+      console.error('[dsh-collab-server] skill registration failed:', error && error.message)
+      return () => {}
+    }
+  })
 
   ctx.effect(() =>
     ctx.tools.register({
