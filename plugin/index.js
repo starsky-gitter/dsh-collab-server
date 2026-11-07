@@ -191,6 +191,63 @@ export function apply(ctx, config) {
   }
   const localSecret = readLocalSecret()
 
+  // File pushes that could not reach the host wait here and retry as soon as
+  // the link is back; they live on disk so a crash does not lose them.
+  const filesOutboxFile = path.join(localDataDir(), 'files-outbox.json')
+  /** @type {Array<{ key: string, project: string, root: string, paths: string[], at: string }>} */
+  let filesOutbox = []
+  try {
+    const raw = JSON.parse(fs.readFileSync(filesOutboxFile, 'utf8'))
+    filesOutbox = Array.isArray(raw) ? raw : []
+  } catch {
+    filesOutbox = []
+  }
+  function saveFilesOutbox() {
+    fs.mkdirSync(path.dirname(filesOutboxFile), { recursive: true })
+    fs.writeFileSync(filesOutboxFile, JSON.stringify(filesOutbox, null, 2))
+  }
+  async function hostReachable() {
+    if (!cfg.primary) return true
+    try {
+      const res = await fetch(String(cfg.primary).replace(/\/+$/, '') + '/api/health', {
+        signal: AbortSignal.timeout(3000),
+      })
+      return res.ok
+    } catch {
+      return false
+    }
+  }
+  function enqueueFilePush(project, root, paths) {
+    const key = project + '|' + root
+    const existing = filesOutbox.find((entry) => entry.key === key)
+    if (existing) {
+      existing.paths = [...new Set([...(existing.paths || []), ...paths])]
+      existing.at = new Date().toISOString()
+    } else {
+      filesOutbox.push({ key, project, root, paths: [...paths], at: new Date().toISOString() })
+    }
+    saveFilesOutbox()
+  }
+
+  ctx.effect(() => {
+    const timer = setInterval(async () => {
+      if (!filesOutbox.length) return
+      if (!(await hostReachable())) return
+      for (const entry of [...filesOutbox]) {
+        try {
+          await syncFiles(entry.root, entry.project, entry.paths, 'push')
+          filesOutbox = filesOutbox.filter((item) => item.key !== entry.key)
+          saveFilesOutbox()
+          console.log('[dsh-collab-server] queued file push delivered:', entry.key)
+        } catch {
+          // still unreachable; the next tick retries
+        }
+      }
+    }, 10000)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  })
+
   function ensureNode() {
     if (cfg.embedded === false) return Promise.resolve(null)
     if (node) return Promise.resolve(node)
@@ -363,27 +420,47 @@ export function apply(ctx, config) {
 
   async function scanFiles(root, project) {
     const remote = await remoteManifest(project).catch(() => [])
-    const remoteMap = new Map(remote.map((entry) => [entry.path, entry.hash]))
+    const remoteByPath = new Map(remote.map((entry) => [entry.path, entry]))
     const files = []
     for (const full of walkFiles(root)) {
       const rel = path.relative(root, full).split(path.sep).join('/')
       const stat = fs.statSync(full)
       const hash = hashOfFile(full, stat)
-      const remoteHash = remoteMap.get(rel) || ''
+      const remoteEntry = remoteByPath.get(rel)
+      const remoteHash = remoteEntry ? remoteEntry.hash : ''
       files.push({
         path: rel,
         size: stat.size,
         mtime: Math.round(stat.mtimeMs),
         hash,
         remoteHash,
+        remoteMtime: remoteEntry ? remoteEntry.mtime : 0,
+        remoteBy: remoteEntry ? remoteEntry.by : '',
         status: !remoteHash ? 'local' : remoteHash === hash ? 'synced' : 'changed',
       })
     }
-    const manifest = files.map((file) => ({ path: file.path, hash: file.hash, size: file.size, mtime: file.mtime, by: member }))
+    const localPaths = new Set(files.map((file) => file.path))
+    for (const entry of remote) {
+      if (localPaths.has(entry.path)) continue
+      files.push({
+        path: entry.path,
+        size: entry.size,
+        mtime: entry.mtime,
+        hash: '',
+        remoteHash: entry.hash,
+        remoteMtime: entry.mtime,
+        remoteBy: entry.by || '',
+        status: 'remote',
+      })
+    }
+    const manifest = files
+      .filter((file) => file.hash)
+      .map((file) => ({ path: file.path, hash: file.hash, size: file.size, mtime: file.mtime, by: member }))
     await api(`/api/files/${encodeURIComponent(project)}/manifest`, { method: 'PUT', body: JSON.stringify({ files: manifest }) })
     // Publish the blobs this node does not have yet, so peers can pull them.
     const localBase = await baseUrl()
     for (const file of files) {
+      if (!file.hash) continue
       const head = await fetch(`${localBase}/api/files/${encodeURIComponent(project)}/blob/${file.hash}`, {
         method: 'HEAD',
         headers: { 'x-team-token': localSecret },
@@ -694,9 +771,13 @@ export function apply(ctx, config) {
         const data = await api('/api/records', { method: 'POST', body: JSON.stringify(payload) })
         const rec = data && data.record
         await refreshBrief()
+        const peers = node ? node.peerState() : []
+        const offline = peers.length > 0 && peers.every((peer) => !peer.online)
         return {
           text: rec
-            ? `已提交记录 ${rec.id}（${rec.status}）。${rec.status === 'draft' ? '等待团队成员在面板中审核。' : ''}`
+            ? `已提交记录 ${rec.id}（${rec.status}）。${rec.status === 'draft' ? '等待团队成员在面板中审核。' : ''}${
+                offline ? '主机当前不可达，已缓存，链路恢复后自动同步。' : ''
+              }`
             : '已提交。',
         }
       },
@@ -823,6 +904,24 @@ export function apply(ctx, config) {
         res.end(text)
         return
       }
+      if (url.startsWith('/team-api/files/pending')) {
+        const query = new URL(url, 'http://local').searchParams
+        const root = query.get('root') || ''
+        const project = query.get('project') || cfg.project
+        if (!root || !fs.existsSync(root)) return sendJson(res, 400, { error: '目录不存在' })
+        const remote = await remoteManifest(project).catch(() => [])
+        let changed = 0
+        let missing = 0
+        for (const entry of remote) {
+          const full = path.join(root, entry.path)
+          if (!fs.existsSync(full)) {
+            missing += 1
+            continue
+          }
+          if (hashOfFile(full, fs.statSync(full)) !== entry.hash) changed += 1
+        }
+        return sendJson(res, 200, { remote: remote.length, changed, missing, pending: changed + missing })
+      }
       if (url.startsWith('/team-api/files/') && req.method === 'POST') {
         const action = url.split('?')[0].replace('/team-api/files/', '')
         let body = {}
@@ -840,8 +939,22 @@ export function apply(ctx, config) {
         }
         if (req.method === 'POST' && action === 'sync') {
           const direction = body.direction === 'push' ? 'push' : body.direction === 'pull' ? 'pull' : 'both'
-          const result = await syncFiles(root, project, body.paths, direction)
-          return sendJson(res, 200, { project, root, ...result })
+          if (direction === 'pull' && !cfg.primary) {
+            return sendJson(res, 400, { error: '主机是发布方，没有可拉取的远端；请用「上传选中」' })
+          }
+          try {
+            const result = await syncFiles(root, project, body.paths, direction)
+            return sendJson(res, 200, { project, root, ...result })
+          } catch (error) {
+            if (direction === 'pull') throw error
+            enqueueFilePush(project, root, Array.isArray(body.paths) ? body.paths : [])
+            return sendJson(res, 202, {
+              project,
+              root,
+              queued: true,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          }
         }
         return sendJson(res, 405, { error: 'unsupported file action' })
       }
