@@ -1,9 +1,20 @@
 {
   "name": "dsh-collab-server",
   "version": "0.2.1",
-  "private": true,
+  "description": "团队共享 AI 上下文：单条记录、按需检索、文件同步、局域网身份认证。",
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "team",
+    "collaboration",
+    "memory",
+    "sync"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
-  "description": "团队共享 AI 上下文：把结论拆成单条记录，AI 按需检索，Web 面板审核。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
