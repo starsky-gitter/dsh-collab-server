@@ -49,8 +49,11 @@
 ### 1. 安装 DSH 插件
 
 ```powershell
-dsh plugin --profile desktop add <本仓库绝对路径>\plugin
+git clone https://github.com/starsky-gitter/dsh-collab-server.git
+dsh plugin --profile desktop add .\dsh-collab-server\plugin
 ```
+
+没有 git 就解压发行包，把 `add` 的路径指向里面的 `plugin` 目录。
 
 重启 DSH。每个实例**内嵌一个节点**：监听 `127.0.0.1:7420`，事件日志存在 DSH profile 目录里，同时服务工具和面板。不用另外起服务，也没有需要保持运行的进程。
 

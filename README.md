@@ -51,8 +51,11 @@ There is no bulk read. Context cost is proportional to what the AI actually need
 ### 1. Install the DSH plugin
 
 ```bash
-dsh plugin --profile desktop add /absolute/path/to/this/repo/plugin
+git clone https://github.com/starsky-gitter/dsh-collab-server.git
+dsh plugin --profile desktop add ./dsh-collab-server/plugin
 ```
+
+Without git, unpack a release zip and point `add` at its `plugin` directory.
 
 Restart DSH. Each instance **embeds its own node**: it listens on `127.0.0.1:7420`, keeps an append-only event log under the DSH profile directory, and serves both the tools and the panel. There is no server to start and nothing to keep running.
 
