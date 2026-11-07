@@ -68,7 +68,7 @@ const TEAM_SKILL = [
   '',
   '1. 先 team_recall 查重；已有就跳过，过期就 team_review 标失效。',
   '2. 没有就 team_share，一条只讲一个结论：title 写"症状 + 条件 + 结论"；body 200–600 字，写现象、适用条件（板卡/芯片/工具链）、验证方式；scope 能填就填；evidence 写一条具体证据。',
-  '3. 没有构建或上板证据时保持 draft；有证据才设 verified。',
+  '3. 一律以 draft 提交；verified 只能由人在面板里点，工具改不了。',
   '4. 不要为了写记录额外做验证。',
 ].join('\n')
 
@@ -76,7 +76,7 @@ const PROTOCOL = [
   '团队共享上下文：任务收尾前（准备交付、结束本轮、或宣布完成之前）自检一次：',
   '这一轮是否得出了可复用的结论（硬件事实、设计取舍、踩坑教训、环境差异）？',
   '有就先 team_recall 查重，再用 team_share 提交一条 200–600 字的记录（标题写症状+条件+结论，正文写现象、适用条件、验证方式）。',
-  '纯实现改动、通用知识、含密钥或客户数据的内容不提交。没有构建或上板证据时保持 draft。',
+  '纯实现改动、通用知识、含密钥或客户数据的内容不提交。记录一律以 draft 提交，由人在面板里审核为 verified。',
 ].join('')
 
 function redact(text) {
@@ -574,7 +574,7 @@ export function apply(ctx, config) {
     ctx.tools.register({
       name: 'team_share',
       description:
-        'Share one atomic conclusion with the team as a record. Use it for reusable hardware facts, design decisions, failure lessons or environment differences. Keep the body 200-600 characters: conclusion, conditions, and how it was verified. Default status is draft; set verified only when you actually have build or hardware evidence in this turn.',
+        'Share one atomic conclusion with the team as a record. Use it for reusable hardware facts, design decisions, failure lessons or environment differences. Keep the body 200-600 characters: conclusion, conditions, and how it was verified. Records always start as drafts; a human reviews them in the panel before they become verified.',
       parameters: {
         type: 'object',
         properties: {
@@ -599,7 +599,7 @@ export function apply(ctx, config) {
               required: ['type', 'label'],
             },
           },
-          status: { type: 'string', enum: ['draft', 'verified'] },
+          status: { type: 'string', description: 'Ignored: records always start as drafts.' },
           sessionId: { type: 'string' },
         },
         required: ['title', 'body', 'kind'],
@@ -617,7 +617,7 @@ export function apply(ctx, config) {
           title: redact(args.title),
           body: redact(args.body),
           kind: args.kind,
-          status: args.status === 'verified' ? 'verified' : 'draft',
+          status: 'draft',
           scope: {
             board: args.board ? redact(args.board) : undefined,
             mcu: args.mcu ? redact(args.mcu) : undefined,
@@ -644,12 +644,12 @@ export function apply(ctx, config) {
     ctx.tools.register({
       name: 'team_review',
       description:
-        'Change the review status of a team record. Use verified only with concrete evidence; use stale when the record no longer matches the current board or toolchain.',
+        'Change the review state of a record you own. Verification is a human action in the panel, so this tool cannot set verified: use it to mark a record stale or superseded when it no longer matches reality.',
       parameters: {
         type: 'object',
         properties: {
           id: { type: 'string' },
-          status: { type: 'string', enum: ['verified', 'stale', 'superseded', 'draft'] },
+          status: { type: 'string', enum: ['draft', 'stale', 'superseded'] },
           note: { type: 'string', description: 'Why the status changed.' },
         },
         required: ['id', 'status'],
