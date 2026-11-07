@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: 'collab-server',
+  id: 'dsh-collab-server',
   factory(require) {
     const React = require('react')
     const h = React.createElement

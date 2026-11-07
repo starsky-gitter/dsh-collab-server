@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { startNode } from './core.js'
 
-export const name = 'collab-server'
+export const name = 'dsh-collab-server'
 
 export const inject = ['tools', 'webServer', 'systemPrompt', 'agents']
 
@@ -204,7 +204,7 @@ export function apply(ctx, config) {
         localName: member,
         peers: peerList,
         advertiseHost,
-        log: (line) => console.log('[collab-server] ' + line),
+        log: (line) => console.log('[dsh-collab-server] ' + line),
       })
         .then((started) => {
           node = started
@@ -212,7 +212,7 @@ export function apply(ctx, config) {
         })
         .catch((error) => {
           nodeFailed = true
-          console.error('[collab-server] embedded node failed, falling back to hubUrl:', error && error.message)
+          console.error('[dsh-collab-server] embedded node failed, falling back to hubUrl:', error && error.message)
           return null
         })
     }
@@ -478,7 +478,7 @@ export function apply(ctx, config) {
           }),
         )
       } catch (error) {
-        console.error('[collab-server] scoped brief failed:', error && error.message)
+        console.error('[dsh-collab-server] scoped brief failed:', error && error.message)
       }
     }),
   )

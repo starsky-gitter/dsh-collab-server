@@ -1,6 +1,6 @@
 - insert:
-    - id: collab-server
-      name: 'collab-server'
+    - id: dsh-collab-server
+      name: 'dsh-collab-server'
       config:
         hubUrl: 'http://127.0.0.1:7420'
         token: 'dev-token'
