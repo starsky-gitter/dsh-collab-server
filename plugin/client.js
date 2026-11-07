@@ -1227,7 +1227,8 @@ window.__ModuleLoader__.load({
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ sessionId: state.sessionId, project: name }),
           })
-          if (!res.ok) throw new Error('HTTP ' + res.status)
+          const data = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error((data && data.error) || 'HTTP ' + res.status)
           setPicker(null)
           if (typeof state.onDone === 'function') state.onDone(name)
         } catch (error) {
