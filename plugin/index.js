@@ -259,7 +259,16 @@ export function apply(ctx, config) {
     try {
       const session = agent && agent.session
       const header = session && session.header
-      return String((header && header.cwd) || (session && session.cwd) || '')
+      const fromHeader = String((header && header.cwd) || (session && session.cwd) || '')
+      if (fromHeader) return fromHeader
+      // Some sessions carry their directory on the working-directory service
+      // instead of the header; ask it before giving up.
+      const wd = ctx.get && ctx.get('workingDirectory')
+      if (wd && session && typeof wd.get === 'function') {
+        const dir = wd.get(session)
+        if (dir) return String(dir)
+      }
+      return ''
     } catch {
       return ''
     }
