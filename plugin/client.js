@@ -282,7 +282,8 @@ window.__ModuleLoader__.load({
         // else is leftover garbage from an earlier failed picker call.
         const stored = /^[A-Za-z]:[\\/]/.test(raw) || /^\\\\/.test(raw) || /^\//.test(raw) ? raw : ''
         if (raw && !stored) window.localStorage.removeItem('collab.fileRoot')
-        const root = stored || (zones[0] && zones[0].cwd) || ''
+        const prefer = zones.find((zone) => zone.project === (sync && sync.project)) || zones[0]
+        const root = stored || (prefer && prefer.cwd) || ''
         const next = { root, files: null, busy: false, msg: '', selected: {} }
         setFileView(next)
         if (root) scanFiles(next)
@@ -1646,7 +1647,13 @@ window.__ModuleLoader__.load({
                 className: 'dtc-search',
                 value: (fileView && fileView.root) || '',
                 placeholder: '工作区目录，例如 D:\\Project\\Motor',
-                onChange: (e) => setFileView({ ...(fileView || {}), root: e.target.value }),
+                onChange: (e) => {
+                  const root = e.target.value
+                  setFileView({ ...(fileView || {}), root })
+                  if (/^[A-Za-z]:[\\/]/.test(root) || /^\\\\/.test(root) || /^\//.test(root)) {
+                    window.localStorage.setItem('collab.fileRoot', root)
+                  }
+                },
               }),
               h(
                 'button',
