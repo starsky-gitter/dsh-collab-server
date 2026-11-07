@@ -141,13 +141,13 @@ window.__ModuleLoader__.load({
       return 'var(--dsw-alias-state-idle-primary)'
     }
 
-    function Panel() {
+    function Panel(props) {
       const [cfg, setCfg] = useState(null)
       const [items, setItems] = useState([])
       const [q, setQ] = useState('')
       const [status, setStatus] = useState('all')
       const [kind, setKind] = useState('all')
-      const [projectFilter, setProjectFilter] = useState('all')
+      const [projectFilter, setProjectFilter] = useState('')
       const [selected, setSelected] = useState(null)
       const [detail, setDetail] = useState(null)
       const [loading, setLoading] = useState(true)
@@ -168,7 +168,8 @@ window.__ModuleLoader__.load({
 
       const load = useCallback(async () => {
         const params = new URLSearchParams()
-        if (projectFilter !== 'all') params.set('project', projectFilter)
+        const activeProject = projectFilter || (cfg && cfg.project) || 'all'
+        if (activeProject !== 'all') params.set('project', activeProject)
         params.set('limit', '200')
         if (q.trim()) params.set('q', q.trim())
         if (status !== 'all') params.set('status', status)
@@ -276,16 +277,26 @@ window.__ModuleLoader__.load({
       }
 
       async function openFiles() {
-        const zones = (sync && sync.zones) || []
-        const raw = window.localStorage.getItem('collab.fileRoot') || ''
-        // Only accept an absolute Windows path or a POSIX path here; anything
-        // else is leftover garbage from an earlier failed picker call.
-        const stored = /^[A-Za-z]:[\\/]/.test(raw) || /^\\\\/.test(raw) || /^\//.test(raw) ? raw : ''
-        if (raw && !stored) window.localStorage.removeItem('collab.fileRoot')
-        const prefer = zones.find((zone) => zone.project === (sync && sync.project)) || zones[0]
-        const root = stored || (prefer && prefer.cwd) || ''
-        const next = { root, files: null, busy: false, msg: '', selected: {} }
+        let current = sync
+        try {
+          current = await api('/config')
+          setSync(current)
+        } catch {
+          current = sync
+        }
+        const zones = (current && current.zones) || []
+        const zoneList = zones.filter((zone) => zone.project === (current && current.project))
+        const prefer = zoneList[0] || null
+        const root = (prefer && prefer.cwd) || ''
+        const next = {
+          root,
+          files: null,
+          busy: false,
+          msg: root ? '' : '尚未绑定工作区：去「合作区」页绑定当前工作区',
+          selected: {},
+        }
         setFileView(next)
+        window.localStorage.setItem('collab.fileRoot', root)
         if (root) scanFiles(next)
         setZoneView(null)
         setMemberView(null)
@@ -370,7 +381,17 @@ window.__ModuleLoader__.load({
         setCreating(false)
         setSelected(null)
         try {
-          setSettingsView({ ...(await api('/settings')), loading: false })
+          const loaded = await api('/settings')
+          let available = []
+          try {
+            const zones = await api('/zones/available')
+            available = (zones && zones.zones) || []
+          } catch {
+            available = []
+          }
+          const current = String((loaded && loaded.project) || '')
+          const project = available.includes(current) ? current : available[0] || current
+          setSettingsView({ ...loaded, available, project, loading: false })
         } catch (e) {
           setSettingsView({ loading: false, msg: String((e && e.message) || e) })
         }
@@ -383,7 +404,10 @@ window.__ModuleLoader__.load({
         try {
           const data = await api('/settings', { method: 'POST', body: JSON.stringify(view) })
           setSettingsView({ ...view, busy: false, msg: data.restartRequired ? '已保存；端口改动需重启 DSH 生效' : '已保存' })
-          setSync(await api('/config'))
+          setToast(data.restartRequired ? '已保存，端口改动需重启 DSH' : '设置已保存')
+          const next = await api('/config')
+          setCfg(next)
+          setSync(next)
         } catch (e) {
           setSettingsView({ ...view, busy: false, msg: String((e && e.message) || e) })
         }
@@ -525,6 +549,7 @@ window.__ModuleLoader__.load({
         }
         try {
           await api('/zones', { method: 'POST', body: JSON.stringify({ cwd, project }) })
+          if (loadRef.current) await loadRef.current()
           await openZones()
           setToast('已把该工作区加入 ' + project)
         } catch (e) {
@@ -910,6 +935,27 @@ window.__ModuleLoader__.load({
               isHost
                 ? '主库地址（留空 = 主机；填 http://主机IP:7420 后保存即成为从机）'
                 : '主库地址（从机填，例如 http://192.168.1.20:7420）',
+            ),
+            h(
+              'div',
+              { style: { marginBottom: '10px' } },
+              h('div', { className: 'dtc-label' }, isHost ? '当前合作区' : '合作区（连接时选择，来自主机）'),
+              (settingsView.available || []).length
+                ? h(
+                    'select',
+                    {
+                      className: 'dtc-select',
+                      style: { width: '100%' },
+                      value: settingsView.project || '',
+                      onChange: (e) => setSettingsView({ ...settingsView, project: e.target.value }),
+                    },
+                    (settingsView.available || []).map((name) => h('option', { key: name, value: name }, name)),
+                  )
+                : h(
+                    'div',
+                    { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } },
+                    isHost ? '还没有合作区，去「合作区」页创建' : '主机不可达或没有合作区',
+                  ),
             ),
             field(
               'token',
@@ -1550,7 +1596,7 @@ window.__ModuleLoader__.load({
             ? h('button', { className: 'dtc-btn', onClick: closeViews }, '关闭')
             : null,
           h('button', { className: 'dtc-btn', onClick: openSettings }, '设置'),
-          h('button', { className: 'dtc-btn', onClick: () => { if (mode === 'files') { scanFiles() } else if (loadRef.current) { loadRef.current() } } }, '刷新'),
+          h('button', { className: 'dtc-btn', onClick: async () => { if (mode === 'files') { scanFiles() } else { try { setCfg(await api('/config')) } catch {} if (loadRef.current) { loadRef.current() } } } }, '刷新'),
           mode === 'records'
             ? h(
                 'button',
@@ -1626,7 +1672,7 @@ window.__ModuleLoader__.load({
             'select',
             {
               className: 'dtc-select',
-              value: projectFilter,
+              value: projectFilter || (cfg && cfg.project) || 'all',
               onChange: (e) => setProjectFilter(e.target.value),
             },
             h('option', { value: 'all' }, '全部合作区'),
@@ -1643,37 +1689,33 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { className: 'dtc-toolbar' },
-              h('input', {
-                className: 'dtc-search',
-                value: (fileView && fileView.root) || '',
-                placeholder: '工作区目录，例如 D:\\Project\\Motor',
-                onChange: (e) => {
-                  const root = e.target.value
-                  setFileView({ ...(fileView || {}), root })
-                  if (/^[A-Za-z]:[\\/]/.test(root) || /^\\\\/.test(root) || /^\//.test(root)) {
-                    window.localStorage.setItem('collab.fileRoot', root)
-                  }
-                },
-              }),
               h(
-                'button',
+                'select',
                 {
-                  className: 'dtc-btn',
-                  onClick: async () => {
-                    try {
-                      const data = await api('/pick-directory', { method: 'POST' })
-                      if (data && data.path) {
-                        window.localStorage.setItem('collab.fileRoot', data.path)
-                        const next = { ...(fileView || {}), root: data.path, files: null, selected: {}, msg: '' }
-                        setFileView(next)
-                        scanFiles(next)
-                      }
-                    } catch (e) {
-                      setError(String((e && e.message) || e))
-                    }
+                  className: 'dtc-select',
+                  style: { flex: '1 1 260px', minWidth: '160px' },
+                  value: ((sync && sync.zones) || []).some(
+                    (zone) =>
+                      zone.cwd === ((fileView && fileView.root) || '') &&
+                      zone.project === (sync && sync.project),
+                  )
+                    ? fileView.root
+                    : '',
+                  onChange: (e) => {
+                    const root = e.target.value
+                    if (!root) return
+                    window.localStorage.setItem('collab.fileRoot', root)
+                    const next = { ...(fileView || {}), root, files: null, selected: {}, msg: '' }
+                    setFileView(next)
+                    scanFiles(next)
                   },
                 },
-                '浏览…',
+                ((sync && sync.zones) || []).some((zone) => zone.project === (sync && sync.project))
+                  ? null
+                  : h('option', { value: '' }, '该合作区还没有工作区'),
+                ((sync && sync.zones) || [])
+                  .filter((zone) => zone.project === (sync && sync.project))
+                  .map((zone) => h('option', { key: zone.cwd, value: zone.cwd }, zone.cwd)),
               ),
               h('button', { className: 'dtc-btn', onClick: scanFiles, disabled: !!(fileView && fileView.busy) }, '扫描'),
               h(
