@@ -167,7 +167,7 @@ export function apply(ctx, config) {
         localName: member,
         peers: peerList,
         advertiseHost,
-        log: (line) => console.log('[team-context] ' + line),
+        log: (line) => console.log('[dsh-collab-server] ' + line),
       })
         .then((started) => {
           node = started
@@ -175,7 +175,7 @@ export function apply(ctx, config) {
         })
         .catch((error) => {
           nodeFailed = true
-          console.error('[team-context] embedded node failed, falling back to hubUrl:', error && error.message)
+          console.error('[dsh-collab-server] embedded node failed, falling back to hubUrl:', error && error.message)
           return null
         })
     }
@@ -441,7 +441,7 @@ export function apply(ctx, config) {
           }),
         )
       } catch (error) {
-        console.error('[team-context] scoped brief failed:', error && error.message)
+        console.error('[dsh-collab-server] scoped brief failed:', error && error.message)
       }
     }),
   )
