@@ -277,8 +277,15 @@ window.__ModuleLoader__.load({
 
       async function openFiles() {
         const zones = (sync && sync.zones) || []
-        const stored = window.localStorage.getItem('collab.fileRoot') || ''
-        setFileView({ root: stored || (zones[0] && zones[0].cwd) || '', files: null, busy: false, msg: '', selected: {} })
+        const raw = window.localStorage.getItem('collab.fileRoot') || ''
+        // Only accept an absolute Windows path or a POSIX path here; anything
+        // else is leftover garbage from an earlier failed picker call.
+        const stored = /^[A-Za-z]:[\\/]/.test(raw) || /^\\\\/.test(raw) || /^\//.test(raw) ? raw : ''
+        if (raw && !stored) window.localStorage.removeItem('collab.fileRoot')
+        const root = stored || (zones[0] && zones[0].cwd) || ''
+        const next = { root, files: null, busy: false, msg: '', selected: {} }
+        setFileView(next)
+        if (root) scanFiles(next)
         setZoneView(null)
         setMemberView(null)
         setSettingsView(null)
@@ -309,8 +316,8 @@ window.__ModuleLoader__.load({
         setPreview({ path: file.path, kind: 'binary', size: file.size, url })
       }
 
-      async function scanFiles() {
-        const view = fileView
+      async function scanFiles(target) {
+        const view = target || fileView
         if (!view || !view.root) return
         setFileView({ ...view, busy: true, msg: '扫描中…' })
         try {
@@ -333,10 +340,8 @@ window.__ModuleLoader__.load({
         if (!view || !view.root || !view.files) return
         const paths = Object.keys(view.selected || {}).filter((key) => view.selected[key])
         if (direction === 'pull') {
-          const risky = (view.files || []).filter(
-            (file) => paths.includes(file.path) && file.status === 'changed' && file.mtime > (file.remoteMtime || 0),
-          )
-          if (risky.length && !window.confirm('有 ' + risky.length + ' 个本地较新的文件会被远端版本覆盖，继续？')) return
+          const risky = (view.files || []).filter((file) => paths.includes(file.path) && isProtectedFile(file))
+          if (risky.length && !window.confirm('有 ' + risky.length + ' 个本机未上传的改动会被覆盖，继续？')) return
         }
         setFileView({ ...view, busy: true, msg: '同步中…' })
         try {
@@ -574,6 +579,13 @@ window.__ModuleLoader__.load({
         }
       }
 
+      function selectByFileStatus(predicate) {
+        if (!fileView || !fileView.files) return
+        const next = {}
+        for (const file of fileView.files) if (predicate(file)) next[file.path] = true
+        setFileView({ ...fileView, selected: next })
+      }
+
       function defaultZone() {
         if (projectFilter !== 'all') return projectFilter
         const list = (sync && sync.projects) || []
@@ -699,6 +711,10 @@ window.__ModuleLoader__.load({
         setFileView(null)
         setMemberView(null)
         setSettingsView(null)
+      }
+
+      function isProtectedFile(file) {
+        return file.status === 'local' || (file.status === 'changed' && file.mtime > (file.remoteMtime || 0))
       }
 
       function renderFileList() {
@@ -888,8 +904,19 @@ window.__ModuleLoader__.load({
               : null,
             field('member', '成员名（仅显示，作者由令牌决定）'),
             field('project', '默认合作区（未绑定工作区时使用）'),
-            isHost ? null : field('primary', '主库地址（从机填，例如 http://192.168.1.20:7420）'),
-            field('token', '我的令牌'),
+            field(
+              'primary',
+              isHost
+                ? '主库地址（留空 = 主机；填 http://主机IP:7420 后保存即成为从机）'
+                : '主库地址（从机填，例如 http://192.168.1.20:7420）',
+            ),
+            field(
+              'token',
+              isHost ? '我的令牌（主机模式不使用）' : '我的令牌',
+              isHost
+                ? { disabled: true, style: { opacity: 0.5, background: 'var(--dsw-alias-bg-layer-2)' } }
+                : undefined,
+            ),
             isHost ? field('adminToken', '管理员令牌（只填在主机上）') : null,
             field('peerPort', '端口', { type: 'number' }),
             h(
@@ -1483,6 +1510,18 @@ window.__ModuleLoader__.load({
             ? 'var(--dsw-alias-state-warn-primary)'
             : 'var(--dsw-alias-state-success-primary)'
       const peerError = (peer && peer.lastError) || (sync && sync.error) || ''
+      const selectedPaths = Object.keys((fileView && fileView.selected) || {}).filter(
+        (key) => fileView.selected[key],
+      )
+      const protectedSelected = ((fileView && fileView.files) || []).filter(
+        (file) => selectedPaths.includes(file.path) && isProtectedFile(file),
+      ).length
+      const allSelected = Boolean(
+        fileView &&
+          fileView.files &&
+          fileView.files.length &&
+          fileView.files.every((file) => fileView.selected && fileView.selected[file.path]),
+      )
       const statusText = cfg
         ? (cfg.primary
             ? '主库 ' + cfg.primary
@@ -1616,7 +1655,12 @@ window.__ModuleLoader__.load({
                   onClick: async () => {
                     try {
                       const data = await api('/pick-directory', { method: 'POST' })
-                      if (data && data.path) setFileView({ ...(fileView || {}), root: data.path })
+                      if (data && data.path) {
+                        window.localStorage.setItem('collab.fileRoot', data.path)
+                        const next = { ...(fileView || {}), root: data.path, files: null, selected: {}, msg: '' }
+                        setFileView(next)
+                        scanFiles(next)
+                      }
                     } catch (e) {
                       setError(String((e && e.message) || e))
                     }
@@ -1630,42 +1674,61 @@ window.__ModuleLoader__.load({
                 {
                   className: 'dtc-btn',
                   onClick: () => {
+                    if (allSelected) {
+                      setFileView({ ...(fileView || {}), selected: {} })
+                      return
+                    }
                     if (!fileView || !fileView.files) return
                     const all = {}
                     for (const file of fileView.files) all[file.path] = true
                     setFileView({ ...fileView, selected: all })
                   },
                 },
-                '全选',
+                allSelected ? '全不选' : '全选',
               ),
               h(
                 'button',
                 {
                   className: 'dtc-btn',
-                  onClick: () => setFileView({ ...(fileView || {}), selected: {} }),
+                  title: '勾选本机改过、还没上传的文件（仅本地 + 本地更新）',
+                  onClick: () => selectByFileStatus((file) => isProtectedFile(file)),
                 },
-                '全不选',
+                '选本机未上传',
               ),
               h(
                 'button',
                 {
                   className: 'dtc-btn',
-                  onClick: () => {
-                    if (!fileView || !fileView.files) return
-                    const next = {}
-                    for (const file of fileView.files) if (file.status !== 'synced') next[file.path] = true
-                    setFileView({ ...fileView, selected: next })
-                  },
+                  title: '勾选远端有更新的文件（远端更新 + 待下载）',
+                  onClick: () =>
+                    selectByFileStatus(
+                      (file) => file.status === 'remote' || (file.status === 'changed' && file.mtime <= (file.remoteMtime || 0)),
+                    ),
                 },
-                '选中更新',
+                '选远端更新',
               ),
-              sync && sync.isHost === false
-                ? h(
-                    'button',
-                    { className: 'dtc-btn', onClick: () => syncFileView('pull'), disabled: !!(fileView && fileView.busy) },
-                    '更新选中',
-                  )
-                : null,
+              h(
+                'button',
+                {
+                  className: 'dtc-btn',
+                  onClick: () => syncFileView('pull'),
+                  disabled: !!(fileView && fileView.busy) || !(sync && sync.isHost === false),
+                  title: !(sync && sync.isHost === false)
+                    ? '主机是发布方，没有可拉取的远端；请用「上传选中」'
+                    : protectedSelected
+                      ? '选中的 ' + protectedSelected + ' 个文件本机未上传，更新会覆盖'
+                      : undefined,
+                  style:
+                    !(sync && sync.isHost === false) || protectedSelected
+                      ? {
+                          opacity: 0.55,
+                          background: 'var(--dsw-alias-bg-layer-2)',
+                          color: 'var(--dsw-alias-label-secondary)',
+                        }
+                      : undefined,
+                },
+                '更新选中',
+              ),
               h(
                 'button',
                 { className: 'dtc-btn', onClick: () => syncFileView('push'), disabled: !!(fileView && fileView.busy) },

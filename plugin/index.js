@@ -402,18 +402,36 @@ export function apply(ctx, config) {
 
   async function pickDirectory() {
     if (process.platform !== 'win32') throw new Error('目录选择仅支持 Windows')
+    // The dialog writes its result to a file: PowerShell stdout can carry
+    // unrelated warnings that would otherwise be mistaken for a path.
+    const outFile = path.join(os.tmpdir(), 'dsh-pick-' + crypto.randomBytes(4).toString('hex') + '.txt')
     const script = [
       'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
       '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
       "$d.Description = '选择要加入合作区的工作区目录'",
-      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
+      "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Set-Content -LiteralPath '" +
+        outFile.replace(/'/g, "''") +
+        "' -Value $d.SelectedPath }",
     ].join('; ')
-    const { stdout } = await execFileAsync(
-      'powershell.exe',
-      ['-NoProfile', '-STA', '-Command', script],
-      { timeout: 180000, windowsHide: true },
-    )
-    const dir = String(stdout || '').trim()
+    try {
+      await execFileAsync('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
+        timeout: 180000,
+        windowsHide: true,
+      })
+    } finally {
+      // read below, then always clean up
+    }
+    let dir = ''
+    try {
+      dir = fs.readFileSync(outFile, 'utf8').trim()
+    } catch {
+      dir = ''
+    }
+    try {
+      fs.unlinkSync(outFile)
+    } catch {
+      // already gone
+    }
     if (!dir) throw new Error('未选择目录')
     return dir
   }
@@ -451,27 +469,6 @@ export function apply(ctx, config) {
         remoteMtime: entry.mtime,
         remoteBy: entry.by || '',
         status: 'remote',
-      })
-    }
-    const manifest = files
-      .filter((file) => file.hash)
-      .map((file) => ({ path: file.path, hash: file.hash, size: file.size, mtime: file.mtime, by: member }))
-    await api(`/api/files/${encodeURIComponent(project)}/manifest`, { method: 'PUT', body: JSON.stringify({ files: manifest }) })
-    // Publish the blobs this node does not have yet, so peers can pull them.
-    const localBase = await baseUrl()
-    for (const file of files) {
-      if (!file.hash) continue
-      const head = await fetch(`${localBase}/api/files/${encodeURIComponent(project)}/blob/${file.hash}`, {
-        method: 'HEAD',
-        headers: { 'x-team-token': localSecret },
-        signal: AbortSignal.timeout(5000),
-      })
-      if (head.ok) continue
-      await fetch(`${localBase}/api/files/${encodeURIComponent(project)}/blob/${file.hash}`, {
-        method: 'PUT',
-        headers: { 'x-team-token': localSecret, 'content-type': 'application/octet-stream' },
-        body: fs.readFileSync(path.join(root, file.path)),
-        signal: AbortSignal.timeout(60000),
       })
     }
     return files
@@ -865,6 +862,21 @@ export function apply(ctx, config) {
             .filter(Boolean)
             .filter((value, index, list) => list.indexOf(value) === index)
           if (node) node.setPeers(peerList)
+          if (cfg.primary && node) {
+            const origin = String(cfg.primary).replace(/\/+$/, '')
+            fetch(origin + '/api/team/whoami', {
+              headers: { 'x-team-token': cfg.token },
+              signal: AbortSignal.timeout(5000),
+            })
+              .then((res) => (res.ok ? res.json() : null))
+              .then((data) => {
+                if (data && data.name && data.name !== 'anonymous') {
+                  node.setLocalName(data.name)
+                  member = data.name
+                }
+              })
+              .catch(() => {})
+          }
           fs.mkdirSync(path.dirname(settingsFile), { recursive: true })
           fs.writeFileSync(
             settingsFile,
