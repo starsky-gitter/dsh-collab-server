@@ -9,6 +9,8 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { startNode } from './core.js'
 
 export const name = 'dsh-collab-server'
@@ -22,7 +24,7 @@ const DEFAULTS = {
   member: '',
   autoBrief: true,
   briefLimit: 8,
-  refreshMs: 60000,
+  refreshMs: 15000,
   timeoutMs: 4000,
   embedded: true,
   peerPort: 7420,
@@ -322,6 +324,26 @@ export function apply(ctx, config) {
     })
     if (!res.ok) throw new Error('manifest ' + res.status)
     return (await res.json()).files || []
+  }
+
+  const execFileAsync = promisify(execFile)
+
+  async function pickDirectory() {
+    if (process.platform !== 'win32') throw new Error('目录选择仅支持 Windows')
+    const script = [
+      'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+      '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
+      "$d.Description = '选择要加入合作区的工作区目录'",
+      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
+    ].join('; ')
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-STA', '-Command', script],
+      { timeout: 180000, windowsHide: true },
+    )
+    const dir = String(stdout || '').trim()
+    if (!dir) throw new Error('未选择目录')
+    return dir
   }
 
   async function scanFiles(root, project) {
@@ -808,6 +830,13 @@ export function apply(ctx, config) {
         }
         return sendJson(res, 405, { error: 'unsupported file action' })
       }
+      if (url === '/team-api/pick-directory' && req.method === 'POST') {
+        try {
+          return sendJson(res, 200, { path: await pickDirectory() })
+        } catch (error) {
+          return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+        }
+      }
       if (url.startsWith('/team-api/zones/available')) {
         const target = cfg.primary ? String(cfg.primary).replace(/\/+$/, '') : await baseUrl()
         const zoneToken = cfg.primary ? cfg.token : localSecret
@@ -832,6 +861,25 @@ export function apply(ctx, config) {
           return sendJson(res, upstream.status, data)
         }
       }
+      const zoneDelete = url.match(/^\/team-api\/zones\/(.+)$/)
+      if (zoneDelete && req.method === 'DELETE') {
+        const name = decodeURIComponent(zoneDelete[1])
+        const target = cfg.primary ? String(cfg.primary).replace(/\/+$/, '') : await baseUrl()
+        const token = cfg.primary ? cfg.token : localSecret
+        const upstream = await fetch(target + '/api/zones/' + encodeURIComponent(name), {
+          method: 'DELETE',
+          headers: { 'x-team-token': token },
+        })
+        const data = await upstream.json().catch(() => ({}))
+        if (upstream.ok) {
+          for (const [cwd, project] of Object.entries(zones)) {
+            if (project === name) delete zones[cwd]
+          }
+          saveZones()
+          refreshBrief()
+        }
+        return sendJson(res, upstream.status, data)
+      }
       if (url === '/team-api/zones' || url.startsWith('/team-api/zones?')) {
         if (req.method === 'GET') {
           return sendJson(res, 200, {
@@ -849,6 +897,7 @@ export function apply(ctx, config) {
           const cwd = typeof body.cwd === 'string' ? body.cwd.trim() : ''
           const project = String(body.project || (cwd ? path.basename(cwd) : '')).trim()
           if (!cwd) return sendJson(res, 400, { error: '缺少工作区路径' })
+          if (!fs.existsSync(cwd)) return sendJson(res, 400, { error: '目录不存在：' + cwd })
           if (!project) return sendJson(res, 400, { error: '缺少合作区名' })
           zones[cwd] = project
           saveZones()
@@ -878,6 +927,7 @@ export function apply(ctx, config) {
           project: cfg.project,
           projects: [...new Set([cfg.project, ...Object.values(zones)])],
           zones: Object.entries(zones).map(([cwd, project]) => ({ cwd, project })),
+          isHost: !cfg.primary,
           member,
           hubUrl: current,
           online,

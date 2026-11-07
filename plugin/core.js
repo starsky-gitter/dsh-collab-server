@@ -160,6 +160,7 @@ export async function startNode(options = {}) {
   const byOrigin = new Map()
   const pending = new Map()
   const records = new Map()
+  const deleted = new Set()
   const orphans = new Map()
   let appending = false
 
@@ -221,7 +222,7 @@ export async function startNode(options = {}) {
 
   function applyEvent(event) {
     if (event.type === 'record' && event.record && event.record.id) {
-      if (records.has(event.record.id)) return
+      if (records.has(event.record.id) || deleted.has(event.record.id)) return
       const record = {
         ...event.record,
         status: 'draft',
@@ -240,6 +241,11 @@ export async function startNode(options = {}) {
     }
     if (event.type === 'status' && event.id && STATUSES.has(event.status)) {
       applyStatus(event)
+      return
+    }
+    if (event.type === 'delete' && event.id) {
+      deleted.add(event.id)
+      records.delete(event.id)
     }
   }
 
@@ -434,19 +440,26 @@ export async function startNode(options = {}) {
 
   const zoneRegistryFile = path.join(dataDir, 'zones-registry.json')
   let zoneRegistry = []
+  let zoneRegistryLoaded = false
   try {
     const raw = JSON.parse(fs.readFileSync(zoneRegistryFile, 'utf8'))
     zoneRegistry = Array.isArray(raw.zones) ? raw.zones.filter((zone) => typeof zone === 'string' && zone) : []
+    zoneRegistryLoaded = true
   } catch {
     zoneRegistry = []
+  }
+  if (!zoneRegistryLoaded) {
+    // First run with an existing store: the projects already in use become zones.
+    zoneRegistry = [...new Set([...records.values()].map((record) => record.project))]
+    if (zoneRegistry.length) {
+      fs.writeFileSync(zoneRegistryFile, JSON.stringify({ zones: zoneRegistry }, null, 2))
+    }
   }
   function saveZoneRegistry() {
     fs.writeFileSync(zoneRegistryFile, JSON.stringify({ zones: zoneRegistry }, null, 2))
   }
   function zoneNames() {
-    const names = new Set(zoneRegistry)
-    for (const record of records.values()) names.add(record.project)
-    return [...names].sort()
+    return [...zoneRegistry].sort()
   }
 
   // --- HTTP ---------------------------------------------------------------
@@ -535,8 +548,16 @@ export async function startNode(options = {}) {
         return send(res, 405, { error: 'method not allowed' })
       }
 
-      if (pathname === '/api/team/members') {
+      const zoneRoute = pathname.match(/^\/api\/zones\/(.+)$/)
+      if (zoneRoute && req.method === 'DELETE') {
         if (auth.role !== 'admin') return send(res, 403, { error: 'admin only' })
+        const name = decodeURIComponent(zoneRoute[1])
+        zoneRegistry = zoneRegistry.filter((zone) => zone !== name)
+        saveZoneRegistry()
+        return send(res, 200, { zones: zoneNames() })
+      }
+
+      if (pathname === '/api/team/members') {
         if (req.method === 'GET') {
           return send(res, 200, {
             members: members.map((entry) => ({
@@ -550,6 +571,7 @@ export async function startNode(options = {}) {
           })
         }
         if (req.method === 'POST') {
+          if (auth.role !== 'admin') return send(res, 403, { error: 'admin only' })
           const body = await readBody(req)
           const name = clip(String(body.name || '').trim(), 60)
           if (!name) return send(res, 400, { error: 'name is required' })
@@ -638,6 +660,7 @@ export async function startNode(options = {}) {
         if (input.status === 'verified') {
           appendLocal({ type: 'status', id: record.id, status: 'verified', by, note: 'created as verified' })
         }
+        syncNow().catch(() => {})
         return send(res, 201, { record: records.get(record.id) })
       }
 
@@ -653,7 +676,14 @@ export async function startNode(options = {}) {
             if (!STATUSES.has(patch.status)) return send(res, 400, { error: 'invalid status' })
             appendLocal({ type: 'status', id: record.id, status: patch.status, by, note: patch.note })
           }
+          syncNow().catch(() => {})
           return send(res, 200, { record: records.get(record.id) })
+        }
+        if (req.method === 'DELETE') {
+          if (auth.role !== 'admin') return send(res, 403, { error: 'admin only' })
+          appendLocal({ type: 'delete', id: record.id, by: auth.name })
+          syncNow().catch(() => {})
+          return send(res, 200, { ok: true })
         }
         return send(res, 405, { error: 'method not allowed' })
       }

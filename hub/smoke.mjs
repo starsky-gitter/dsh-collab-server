@@ -149,10 +149,16 @@ try {
     })
   ).json()
   assert(asMember.record.author === '张三', 'author is derived from the member token')
-  const forbidden = await fetch(A.url + '/api/team/members', {
+  const roster = await fetch(A.url + '/api/team/members', {
     headers: { 'x-team-token': memberCreated.token },
   })
-  assert(forbidden.status === 403, 'a member cannot list the roster')
+  assert(roster.status === 200, 'a member can read the roster')
+  const forbidden = await fetch(A.url + '/api/team/members', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-team-token': memberCreated.token },
+    body: JSON.stringify({ name: 'x' }),
+  })
+  assert(forbidden.status === 403, 'a member cannot create members')
 
   const rotated = await (
     await fetch(A.url + '/api/team/members/' + memberCreated.member.id + '/token', {

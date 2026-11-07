@@ -152,7 +152,7 @@ window.__ModuleLoader__.load({
       const [fileView, setFileView] = useState(null)
       const [memberView, setMemberView] = useState(null)
       const [settingsView, setSettingsView] = useState(null)
-      const [form, setForm] = useState({ title: '', body: '', kind: 'fact' })
+      const [form, setForm] = useState({ title: '', body: '', kind: 'fact', project: '' })
       const [toast, setToast] = useState('')
       const loadRef = useRef(null)
 
@@ -201,7 +201,7 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         const timer = setInterval(() => {
           if (loadRef.current) loadRef.current()
-        }, 20000)
+        }, 10000)
         return () => clearInterval(timer)
       }, [])
 
@@ -230,9 +230,10 @@ window.__ModuleLoader__.load({
       async function patchStatus(id, next) {
         setBusy(true)
         try {
+          const note = next === 'stale' ? window.prompt('失效原因（可留空）') || '' : undefined
           await api('/records/' + encodeURIComponent(id), {
             method: 'PATCH',
-            body: JSON.stringify({ status: next }),
+            body: JSON.stringify(note === undefined ? { status: next } : { status: next, note }),
           })
           setToast('已更新为「' + (STATUS_LABEL[next] || next) + '」')
           if (loadRef.current) await loadRef.current()
@@ -299,15 +300,16 @@ window.__ModuleLoader__.load({
       }
 
       async function openSettings() {
+        setSettingsView({ loading: true })
         setFileView(null)
         setZoneView(null)
         setMemberView(null)
         setCreating(false)
         setSelected(null)
         try {
-          setSettingsView(await api('/settings'))
+          setSettingsView({ ...(await api('/settings')), loading: false })
         } catch (e) {
-          setError(String((e && e.message) || e))
+          setSettingsView({ loading: false, msg: String((e && e.message) || e) })
         }
       }
 
@@ -411,22 +413,40 @@ window.__ModuleLoader__.load({
       }
 
       async function openZones() {
+        setZoneView({ zones: [], available: [], loading: true, newName: '', bindPath: '', bindProject: '' })
+        setFileView(null)
+        setMemberView(null)
+        setSettingsView(null)
+        setCreating(false)
+        setSelected(null)
+        setError('')
         try {
-          const [bindings, available] = await Promise.all([api('/zones'), api('/zones/available')])
-          const zoneNames = (available && available.zones) || []
-          setZoneView({
-            ...bindings,
-            available: zoneNames,
-            newName: '',
-            bindPath: '',
-            bindProject: zoneNames[0] || '',
-          })
-          setFileView(null)
-          setMemberView(null)
-          setSettingsView(null)
-          setCreating(false)
-          setSelected(null)
-          setError('')
+          const bindings = await api('/zones')
+          setZoneView((view) => ({ ...(view || {}), zones: bindings.zones || [], loading: true }))
+        } catch (e) {
+          setError(String((e && e.message) || e))
+        }
+        try {
+          const available = await api('/zones/available')
+          const names = (available && available.zones) || []
+          setZoneView((view) => ({
+            ...(view || { zones: [] }),
+            available: names,
+            bindProject: (view && view.bindProject) || names[0] || '',
+            loading: false,
+          }))
+        } catch (e) {
+          setZoneView((view) => ({ ...(view || { zones: [] }), loading: false }))
+          setError(String((e && e.message) || e))
+        }
+      }
+
+      async function removeZone(name) {
+        if (!window.confirm('删除合作区 ' + name + '？里面的记录不会被删除。')) return
+        try {
+          await api('/zones/' + encodeURIComponent(name), { method: 'DELETE' })
+          await openZones()
+          setToast('已删除合作区 ' + name)
         } catch (e) {
           setError(String((e && e.message) || e))
         }
@@ -472,6 +492,22 @@ window.__ModuleLoader__.load({
         }
       }
 
+      async function deleteRecord(id) {
+        if (!window.confirm('删除这条记录？其他机器同步后也会删除。')) return
+        setBusy(true)
+        try {
+          await api('/records/' + encodeURIComponent(id), { method: 'DELETE' })
+          setDetail(null)
+          setSelected(null)
+          if (loadRef.current) await loadRef.current()
+          setToast('已删除')
+        } catch (e) {
+          setError(String((e && e.message) || e))
+        } finally {
+          setBusy(false)
+        }
+      }
+
       async function copy(text, label) {
         try {
           await navigator.clipboard.writeText(text)
@@ -479,6 +515,12 @@ window.__ModuleLoader__.load({
         } catch {
           setToast('复制失败，请手动选择')
         }
+      }
+
+      function defaultZone() {
+        if (projectFilter !== 'all') return projectFilter
+        const list = (sync && sync.projects) || []
+        return list[0] || (cfg && cfg.project) || 'default'
       }
 
       async function submitNew() {
@@ -491,7 +533,7 @@ window.__ModuleLoader__.load({
           const data = await api('/records', {
             method: 'POST',
             body: JSON.stringify({
-              project: cfg.project,
+              project: form.project || defaultZone(),
               title: form.title,
               body: form.body,
               kind: form.kind,
@@ -499,7 +541,7 @@ window.__ModuleLoader__.load({
             }),
           })
           setCreating(false)
-          setForm({ title: '', body: '', kind: 'fact' })
+          setForm({ title: '', body: '', kind: 'fact', project: '' })
           setToast('已新建记录')
           if (loadRef.current) await loadRef.current()
           if (data && data.record) setSelected(data.record.id)
@@ -570,7 +612,41 @@ window.__ModuleLoader__.load({
         )
       }
 
+      function settingsTabs(active) {
+        const hostMode = !(sync && sync.isHost === false)
+        const items = [
+          ['general', '通用', openSettings],
+          ...(hostMode ? [['members', '成员', openMembers]] : []),
+          ['files', '文件', openFiles],
+          ['zones', '合作区', openZones],
+        ]
+        return h(
+          'div',
+          { className: 'dtc-row', style: { marginBottom: '12px' } },
+          items.map(([key, label, open]) =>
+            h(
+              'button',
+              {
+                key,
+                className: 'dtc-btn' + (active === key ? ' dtc-btn-primary' : ''),
+                onClick: open,
+              },
+              label,
+            ),
+          ),
+        )
+      }
+
+      function closeViews() {
+        setCreating(false)
+        setZoneView(null)
+        setFileView(null)
+        setMemberView(null)
+        setSettingsView(null)
+      }
+
       function renderDetail() {
+        const isHost = !(sync && sync.isHost === false)
         if (settingsView) {
           const field = (key, label, opts) =>
             h(
@@ -591,12 +667,20 @@ window.__ModuleLoader__.load({
           return h(
             'div',
             { className: 'dtc-detail' },
+            settingsTabs('general'),
             h('div', { className: 'dtc-h2' }, '设置'),
             h(
               'div',
               { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', marginBottom: '12px' } },
               '保存在本机；令牌和地址立即生效，端口改动需要重启 DSH。',
             ),
+            settingsView.loading
+              ? h(
+                  'div',
+                  { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '8px' } },
+                  '读取中…',
+                )
+              : null,
             settingsView.advertise
               ? h(
                   'div',
@@ -615,9 +699,9 @@ window.__ModuleLoader__.load({
               : null,
             field('member', '成员名（仅显示，作者由令牌决定）'),
             field('project', '默认合作区（未绑定工作区时使用）'),
-            field('primary', '主库地址（从机填，例如 http://192.168.1.20:7420）'),
+            isHost ? null : field('primary', '主库地址（从机填，例如 http://192.168.1.20:7420）'),
             field('token', '我的令牌'),
-            field('adminToken', '管理员令牌（只填在主机上）'),
+            isHost ? field('adminToken', '管理员令牌（只填在主机上）') : null,
             field('peerPort', '端口', { type: 'number' }),
             h(
               'div',
@@ -638,16 +722,18 @@ window.__ModuleLoader__.load({
                 ? h('div', null, '上次同步：' + (settingsView.lastSync.at || '从未') + '，成功 ' + settingsView.lastSync.ok + ' 失败 ' + settingsView.lastSync.failed)
                 : null,
             ),
-            h(
-              'label',
-              { style: { display: 'flex', gap: '8px', alignItems: 'center', margin: '10px 0', fontSize: '12px' } },
-              h('input', {
-                type: 'checkbox',
-                checked: settingsView.expose === true,
-                onChange: (e) => setSettingsView({ ...settingsView, expose: e.target.checked }),
-              }),
-              '允许其它机器连入（主机勾选，需重启）',
-            ),
+            isHost
+              ? h(
+                  'label',
+                  { style: { display: 'flex', gap: '8px', alignItems: 'center', margin: '10px 0', fontSize: '12px' } },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: settingsView.expose === true,
+                    onChange: (e) => setSettingsView({ ...settingsView, expose: e.target.checked }),
+                  }),
+                  '允许其它机器连入（主机勾选，需重启）',
+                )
+              : null,
             h(
               'label',
               { style: { display: 'flex', gap: '8px', alignItems: 'center', margin: '10px 0', fontSize: '12px' } },
@@ -696,28 +782,31 @@ window.__ModuleLoader__.load({
             ),
           )
         }
-        if (memberView) {
+        if (memberView && isHost) {
           return h(
             'div',
             { className: 'dtc-detail' },
-            h('div', { className: 'dtc-h2' }, '成员与令牌'),
+            settingsTabs('members'),
+            h('div', { className: 'dtc-h2' }, isHost ? '成员与令牌' : '成员'),
             h(
               'div',
               { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', marginBottom: '10px' } },
               '每人一个令牌，作者由令牌推导，不能自称。令牌只显示一次，复制后发给对方填进配置。',
             ),
-            h(
-              'div',
-              { className: 'dtc-row', style: { marginBottom: '12px' } },
-              h('input', {
-                className: 'dtc-input',
-                style: { flex: 1 },
-                placeholder: '成员名，例如 张三',
-                value: memberView.newName || '',
-                onChange: (e) => setMemberView({ ...memberView, newName: e.target.value }),
-              }),
-              h('button', { className: 'dtc-btn', onClick: addMember, disabled: memberView.busy }, '添加成员'),
-            ),
+            isHost
+              ? h(
+                  'div',
+                  { className: 'dtc-row', style: { marginBottom: '12px' } },
+                  h('input', {
+                    className: 'dtc-input',
+                    style: { flex: 1 },
+                    placeholder: '成员名，例如 张三',
+                    value: memberView.newName || '',
+                    onChange: (e) => setMemberView({ ...memberView, newName: e.target.value }),
+                  }),
+                  h('button', { className: 'dtc-btn', onClick: addMember, disabled: memberView.busy }, '添加成员'),
+                )
+              : null,
             memberView.token
               ? h(
                   'div',
@@ -759,16 +848,31 @@ window.__ModuleLoader__.load({
                         member.role + ' · ' + String(member.createdAt || '').slice(0, 10),
                       ),
                     ),
-                    h(
-                      'button',
-                      { className: 'dtc-btn', onClick: () => rotateMember(member.id), disabled: memberView.busy },
-                      '重置令牌',
-                    ),
-                    h(
-                      'button',
-                      { className: 'dtc-btn', onClick: () => deleteMember(member.id), disabled: memberView.busy },
-                      '删除',
-                    ),
+                    isHost
+                      ? [
+                          h(
+                            'button',
+                            { key: 'rotate', className: 'dtc-btn', onClick: () => rotateMember(member.id), disabled: memberView.busy },
+                            '重置令牌',
+                          ),
+                          h(
+                            'button',
+                            { key: 'delete', className: 'dtc-btn', onClick: () => deleteMember(member.id), disabled: memberView.busy },
+                            '删除',
+                          ),
+                        ]
+                      : h(
+                          'span',
+                          {
+                            style: {
+                              fontSize: '11px',
+                              color: member.disabled
+                                ? 'var(--dsw-alias-state-error-primary)'
+                                : 'var(--dsw-alias-state-success-primary)',
+                            },
+                          },
+                          member.disabled ? '已禁用' : '正常',
+                        ),
                   ),
                 )
               : h(
@@ -776,6 +880,11 @@ window.__ModuleLoader__.load({
                   { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } },
                   '还没有成员。用上面的表单创建，把令牌发给对方。',
                 ),
+            h(
+              'div',
+              { style: { marginTop: '16px' } },
+              h('button', { className: 'dtc-btn', onClick: () => setMemberView(null) }, '关闭'),
+            ),
           )
         }
         if (fileView) {
@@ -783,6 +892,7 @@ window.__ModuleLoader__.load({
           return h(
             'div',
             { className: 'dtc-detail' },
+            settingsTabs('files'),
             h('div', { className: 'dtc-h2' }, '文件同步'),
             h(
               'div',
@@ -886,6 +996,7 @@ window.__ModuleLoader__.load({
           return h(
             'div',
             { className: 'dtc-detail' },
+            settingsTabs('zones'),
             h('div', { className: 'dtc-h2' }, '合作区'),
             h(
               'div',
@@ -899,6 +1010,13 @@ window.__ModuleLoader__.load({
                 grouped[binding.project].push(binding.cwd)
               }
               const names = [...new Set([...(zoneView.available || []), ...Object.keys(grouped)])]
+              if (zoneView.loading && !names.length) {
+                return h(
+                  'div',
+                  { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } },
+                  '读取中…',
+                )
+              }
               if (!names.length) {
                 return h(
                   'div',
@@ -919,6 +1037,10 @@ window.__ModuleLoader__.load({
                       { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' } },
                       (grouped[name] || []).length + ' 个工作区',
                     ),
+                    h('div', { style: { flex: 1 } }),
+                    isHost
+                      ? h('button', { className: 'dtc-btn', onClick: () => removeZone(name) }, '删除')
+                      : null,
                   ),
                   (grouped[name] || []).length
                     ? grouped[name].map((cwd) =>
@@ -980,20 +1102,26 @@ window.__ModuleLoader__.load({
                 : h(
                     'div',
                     { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } },
-                    '还没有合作区，在下面新建一个。',
+                    '还没有合作区。',
                   ),
-              h(
-                'div',
-                { className: 'dtc-row', style: { marginTop: '8px' } },
-                h('input', {
-                  className: 'dtc-input',
-                  style: { flex: 1 },
-                  placeholder: '新合作区名，例如 motor-f407',
-                  value: zoneView.newName || '',
-                  onChange: (e) => setZoneView({ ...zoneView, newName: e.target.value }),
-                }),
-                h('button', { className: 'dtc-btn', onClick: createZone }, '创建'),
-              ),
+              sync && sync.isHost === false
+                ? h(
+                    'div',
+                    { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', marginTop: '6px' } },
+                    '合作区由主机创建，成员只能加入。',
+                  )
+                : h(
+                    'div',
+                    { className: 'dtc-row', style: { marginTop: '8px' } },
+                    h('input', {
+                      className: 'dtc-input',
+                      style: { flex: 1 },
+                      placeholder: '新合作区名，例如 motor-f407',
+                      value: zoneView.newName || '',
+                      onChange: (e) => setZoneView({ ...zoneView, newName: e.target.value }),
+                    }),
+                    h('button', { className: 'dtc-btn', onClick: createZone }, '创建'),
+                  ),
             ),
             h(
               'div',
@@ -1014,6 +1142,21 @@ window.__ModuleLoader__.load({
                   value: zoneView.bindPath || '',
                   onChange: (e) => setZoneView({ ...zoneView, bindPath: e.target.value }),
                 }),
+                h(
+                  'button',
+                  {
+                    className: 'dtc-btn',
+                    onClick: async () => {
+                      try {
+                        const data = await api('/pick-directory', { method: 'POST' })
+                        if (data && data.path) setZoneView((view) => ({ ...(view || {}), bindPath: data.path }))
+                      } catch (e) {
+                        setError(String((e && e.message) || e))
+                      }
+                    },
+                  },
+                  '浏览…',
+                ),
                 h(
                   'select',
                   {
@@ -1071,6 +1214,15 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'dtc-row' },
+                h(
+                  'select',
+                  {
+                    className: 'dtc-select',
+                    value: form.project || defaultZone(),
+                    onChange: (e) => setForm({ ...form, project: e.target.value }),
+                  },
+                  ((sync && sync.projects) || [defaultZone()]).map((name) => h('option', { key: name, value: name }, name)),
+                ),
                 h(
                   'select',
                   {
@@ -1153,6 +1305,30 @@ window.__ModuleLoader__.load({
                 ),
               )
             : null,
+          Array.isArray(r.history) && r.history.length
+            ? h(
+                'div',
+                { style: { marginTop: '14px' } },
+                h('div', { className: 'dtc-label' }, '历史'),
+                h(
+                  'ul',
+                  { className: 'dtc-evidence' },
+                  r.history.slice(-10).map((entry, i) =>
+                    h(
+                      'li',
+                      { key: i },
+                      String(entry.at || '').slice(0, 16).replace('T', ' ') +
+                        ' · ' +
+                        (entry.by || '?') +
+                        ' · ' +
+                        (entry.action || '') +
+                        (entry.from && entry.to ? ' ' + entry.from + '→' + entry.to : '') +
+                        (entry.note ? ' · ' + entry.note : ''),
+                    ),
+                  ),
+                ),
+              )
+            : null,
           h(
             'div',
             { className: 'dtc-actions' },
@@ -1183,6 +1359,17 @@ window.__ModuleLoader__.load({
               },
               '退回待审',
             ),
+            isHost
+              ? h(
+                  'button',
+                  {
+                    className: 'dtc-btn',
+                    disabled: busy,
+                    onClick: () => deleteRecord(r.id),
+                  },
+                  '删除',
+                )
+              : null,
             h('div', { className: 'dtc-spacer' }),
             h('button', { className: 'dtc-btn', onClick: () => copy(r.id, '已复制记录 id') }, '复制 id'),
             h(
@@ -1231,16 +1418,18 @@ window.__ModuleLoader__.load({
             h('span', null, h('span', { className: 'dtc-dot', style: { background: dotColor } }), statusText),
           ),
           h('div', { className: 'dtc-spacer' }),
+          creating || zoneView || fileView || memberView || settingsView
+            ? h('button', { className: 'dtc-btn', onClick: closeViews }, '关闭')
+            : null,
           h('button', { className: 'dtc-btn', onClick: openSettings }, '设置'),
-          h('button', { className: 'dtc-btn', onClick: openMembers }, '成员'),
-          h('button', { className: 'dtc-btn', onClick: openFiles }, '文件'),
-          h('button', { className: 'dtc-btn', onClick: openZones }, '合作区'),
           h('button', { className: 'dtc-btn', onClick: () => loadRef.current && loadRef.current() }, '刷新'),
           h(
             'button',
             {
               className: 'dtc-btn dtc-btn-primary',
               onClick: () => {
+                closeViews()
+                setForm({ title: '', body: '', kind: 'fact', project: defaultZone() })
                 setCreating(true)
                 setSelected(null)
               },
