@@ -7,6 +7,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { startNode } from '../plugin/core.js'
 
 const TOKEN = 'smoke-token'
@@ -106,6 +107,64 @@ try {
   assert(hostRecords.records.length === 2, 'buffered write reached the host on reconnect')
   const drained = B.peerState().reduce((sum, state) => sum + state.pending, 0)
   assert(drained === 0, 'pending drains after a successful round')
+
+  // shared files: manifest + content-addressed blob
+  await fetch(A.url + '/api/files/demo/manifest', {
+    method: 'PUT',
+    headers: HEADERS,
+    body: JSON.stringify({ files: [{ path: 'Core/Src/main.c', hash: 'a'.repeat(64), size: 12, mtime: 1, by: 'tester' }] }),
+  })
+  const manifest = await (await fetch(A.url + '/api/files/demo/manifest', { headers: HEADERS })).json()
+  assert(manifest.files.length === 1 && manifest.files[0].path === 'Core/Src/main.c', 'file manifest roundtrip')
+
+  const payload = Buffer.from('hello team')
+  const hash = createHash('sha256').update(payload).digest('hex')
+  const upload = await fetch(A.url + '/api/files/demo/blob/' + hash, {
+    method: 'PUT',
+    headers: { 'x-team-token': TOKEN },
+    body: payload,
+  })
+  assert(upload.status === 200, 'blob upload')
+  const download = await fetch(A.url + '/api/files/demo/blob/' + hash, { headers: { 'x-team-token': TOKEN } })
+  assert((await download.text()) === 'hello team', 'blob download matches')
+
+  // identity: one token per member, author derived from the token
+  const memberCreated = await (
+    await fetch(A.url + '/api/team/members', {
+      method: 'POST',
+      headers: HEADERS,
+      body: JSON.stringify({ name: '张三' }),
+    })
+  ).json()
+  assert(memberCreated.token && memberCreated.member.id, 'admin creates a member with a token')
+  const asMember = await (
+    await fetch(A.url + '/api/records', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-team-token': memberCreated.token },
+      body: JSON.stringify({ project: 'demo', kind: 'fact', title: '成员写入', body: '作者应由令牌推导，而不是客户端自称。' }),
+    })
+  ).json()
+  assert(asMember.record.author === '张三', 'author is derived from the member token')
+  const forbidden = await fetch(A.url + '/api/team/members', {
+    headers: { 'x-team-token': memberCreated.token },
+  })
+  assert(forbidden.status === 403, 'a member cannot list the roster')
+
+  const rotated = await (
+    await fetch(A.url + '/api/team/members/' + memberCreated.member.id + '/token', {
+      method: 'POST',
+      headers: HEADERS,
+    })
+  ).json()
+  assert(rotated.token && rotated.token !== memberCreated.token, 'a token can be rotated at any time')
+  const oldToken = await fetch(A.url + '/api/records', { headers: { 'x-team-token': memberCreated.token } })
+  assert(oldToken.status === 401, 'the old token stops working after rotation')
+  const newTokenOk = await fetch(A.url + '/api/records', { headers: { 'x-team-token': rotated.token } })
+  assert(newTokenOk.status === 200, 'the rotated token works')
+
+  await fetch(A.url + '/api/team/members/' + memberCreated.member.id, { method: 'DELETE', headers: HEADERS })
+  const afterDelete = await fetch(A.url + '/api/records', { headers: { 'x-team-token': rotated.token } })
+  assert(afterDelete.status === 401, 'a deleted member cannot authenticate')
 
   console.log('\nSMOKE OK')
 } catch (error) {

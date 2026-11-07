@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@local/dsh-team-context',
+  id: 'dsh-collab-server',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -61,7 +61,7 @@ window.__ModuleLoader__.load({
 
     const CSS = `
       .dtc-root{display:flex;flex-direction:column;height:100%;min-height:520px;color:var(--dsw-alias-label-primary);font-size:13px}
-      .dtc-head{display:flex;align-items:center;gap:10px;padding:0 0 12px;flex-wrap:wrap}
+      .dtc-head{display:flex;align-items:center;gap:10px;padding:0 0 12px;flex-wrap:wrap;position:relative;z-index:2;flex-shrink:0}
       .dtc-title{font-size:16px;font-weight:600;line-height:1.2}
       .dtc-sub{color:var(--dsw-alias-label-secondary);font-size:12px}
       .dtc-spacer{flex:1}
@@ -71,7 +71,7 @@ window.__ModuleLoader__.load({
       .dtc-btn:disabled{opacity:.45;cursor:default}
       .dtc-btn-primary{background:var(--dsw-alias-brand-primary);border-color:transparent;color:var(--dsw-alias-bg-base);font-weight:500}
       .dtc-btn-primary:hover{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 86%,#000);border-color:transparent}
-      .dtc-toolbar{display:flex;gap:8px;align-items:center;padding:0 0 10px;flex-wrap:wrap}
+      .dtc-toolbar{display:flex;gap:8px;align-items:center;padding:0 0 10px;flex-wrap:wrap;position:relative;z-index:1}
       .dtc-search{flex:1;min-width:180px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);border-radius:8px;padding:6px 10px;font-size:12px;outline:none}
       .dtc-search:focus{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 18%,transparent)}
       .dtc-chip{border:1px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:999px;padding:4px 10px;font-size:12px;cursor:pointer}
@@ -149,6 +149,9 @@ window.__ModuleLoader__.load({
       const [creating, setCreating] = useState(false)
       const [sync, setSync] = useState(null)
       const [zoneView, setZoneView] = useState(null)
+      const [fileView, setFileView] = useState(null)
+      const [memberView, setMemberView] = useState(null)
+      const [settingsView, setSettingsView] = useState(null)
       const [form, setForm] = useState({ title: '', body: '', kind: 'fact' })
       const [toast, setToast] = useState('')
       const loadRef = useRef(null)
@@ -244,9 +247,175 @@ window.__ModuleLoader__.load({
         }
       }
 
+      function projectForRoot(root) {
+        const zones = (sync && sync.zones) || []
+        const hit = zones.find((zone) => zone.cwd === root)
+        if (hit) return hit.project
+        return (cfg && cfg.project) || 'default'
+      }
+
+      async function openFiles() {
+        const zones = (sync && sync.zones) || []
+        setFileView({ root: (zones[0] && zones[0].cwd) || '', files: null, busy: false, msg: '', selected: {} })
+        setZoneView(null)
+        setMemberView(null)
+        setSettingsView(null)
+        setCreating(false)
+        setSelected(null)
+      }
+
+      async function scanFiles() {
+        const view = fileView
+        if (!view || !view.root) return
+        setFileView({ ...view, busy: true, msg: '扫描中…' })
+        try {
+          const data = await api('/files/scan', {
+            method: 'POST',
+            body: JSON.stringify({ root: view.root, project: projectForRoot(view.root) }),
+          })
+          const selected = {}
+          for (const file of data.files) if (file.status !== 'synced') selected[file.path] = true
+          setFileView({ ...view, busy: false, msg: '', files: data.files, selected })
+        } catch (e) {
+          setFileView({ ...view, busy: false, msg: String((e && e.message) || e) })
+        }
+      }
+
+      async function syncFileView(direction) {
+        const view = fileView
+        if (!view || !view.root || !view.files) return
+        const paths = Object.keys(view.selected || {}).filter((key) => view.selected[key])
+        setFileView({ ...view, busy: true, msg: '同步中…' })
+        try {
+          const data = await api('/files/sync', {
+            method: 'POST',
+            body: JSON.stringify({ root: view.root, project: projectForRoot(view.root), paths, direction }),
+          })
+          setFileView({ ...view, busy: false, msg: '完成：下载 ' + data.pulled + '，上传 ' + data.pushed })
+          await scanFiles()
+        } catch (e) {
+          setFileView({ ...view, busy: false, msg: String((e && e.message) || e) })
+        }
+      }
+
+      async function openSettings() {
+        setFileView(null)
+        setZoneView(null)
+        setMemberView(null)
+        setCreating(false)
+        setSelected(null)
+        try {
+          setSettingsView(await api('/settings'))
+        } catch (e) {
+          setError(String((e && e.message) || e))
+        }
+      }
+
+      async function saveSettings() {
+        const view = settingsView
+        if (!view) return
+        setSettingsView({ ...view, busy: true, msg: '' })
+        try {
+          const data = await api('/settings', { method: 'POST', body: JSON.stringify(view) })
+          setSettingsView({ ...view, busy: false, msg: data.restartRequired ? '已保存；端口改动需重启 DSH 生效' : '已保存' })
+          setSync(await api('/config'))
+        } catch (e) {
+          setSettingsView({ ...view, busy: false, msg: String((e && e.message) || e) })
+        }
+      }
+
+      async function openMembers() {
+        setMemberView({ members: [], busy: true, msg: '', token: '', newName: '' })
+        setFileView(null)
+        setZoneView(null)
+        setSettingsView(null)
+        setCreating(false)
+        setSelected(null)
+        try {
+          const data = await api('/admin/members')
+          setMemberView((current) => ({
+            ...(current || {}),
+            members: data.members || [],
+            delegated: data.delegated,
+            busy: false,
+          }))
+        } catch (e) {
+          setMemberView((current) => ({ ...(current || {}), busy: false, msg: String((e && e.message) || e) }))
+        }
+      }
+
+      async function addMember() {
+        const view = memberView
+        if (!view || !String(view.newName || '').trim()) return
+        setMemberView({ ...view, busy: true, msg: '' })
+        try {
+          const data = await api('/admin/members', {
+            method: 'POST',
+            body: JSON.stringify({ name: String(view.newName).trim() }),
+          })
+          setMemberView({
+            ...view,
+            busy: false,
+            token: data.token,
+            newName: '',
+            members: [...(view.members || []), data.member],
+          })
+        } catch (e) {
+          setMemberView({ ...view, busy: false, msg: String((e && e.message) || e) })
+        }
+      }
+
+      async function disableMember(id) {
+        const view = memberView
+        if (!view) return
+        setMemberView({ ...view, busy: true })
+        try {
+          await api('/admin/members/' + encodeURIComponent(id), { method: 'DELETE' })
+          setMemberView({
+            ...view,
+            busy: false,
+            members: (view.members || []).map((member) => (member.id === id ? { ...member, disabled: true } : member)),
+          })
+        } catch (e) {
+          setMemberView({ ...view, busy: false, msg: String((e && e.message) || e) })
+        }
+      }
+
+      async function rotateMember(id) {
+        const view = memberView
+        if (!view) return
+        setMemberView({ ...view, busy: true, msg: '' })
+        try {
+          const data = await api('/admin/members/' + encodeURIComponent(id) + '/token', { method: 'POST' })
+          setMemberView({ ...view, busy: false, token: data.token })
+        } catch (e) {
+          setMemberView({ ...view, busy: false, msg: String((e && e.message) || e) })
+        }
+      }
+
+      async function deleteMember(id) {
+        const view = memberView
+        if (!view) return
+        setMemberView({ ...view, busy: true, msg: '' })
+        try {
+          await api('/admin/members/' + encodeURIComponent(id), { method: 'DELETE' })
+          setMemberView({
+            ...view,
+            busy: false,
+            token: '',
+            members: (view.members || []).filter((member) => member.id !== id),
+          })
+        } catch (e) {
+          setMemberView({ ...view, busy: false, msg: String((e && e.message) || e) })
+        }
+      }
+
       async function openZones() {
         try {
           setZoneView(await api('/zones'))
+          setFileView(null)
+          setMemberView(null)
+          setSettingsView(null)
           setCreating(false)
           setSelected(null)
           setError('')
@@ -335,6 +504,9 @@ window.__ModuleLoader__.load({
               className: 'dtc-item' + (selected === r.id ? ' on' : ''),
               onClick: () => {
                 setZoneView(null)
+                setFileView(null)
+                setMemberView(null)
+                setSettingsView(null)
                 setSelected(r.id)
               },
             },
@@ -361,6 +533,256 @@ window.__ModuleLoader__.load({
       }
 
       function renderDetail() {
+        if (settingsView) {
+          const field = (key, label, opts) =>
+            h(
+              'div',
+              { style: { marginBottom: '10px' } },
+              h('div', { className: 'dtc-label' }, label),
+              h('input', {
+                className: 'dtc-input',
+                value: settingsView[key] === undefined || settingsView[key] === null ? '' : settingsView[key],
+                ...(opts || {}),
+                onChange: (e) =>
+                  setSettingsView({
+                    ...settingsView,
+                    [key]: opts && opts.type === 'number' ? Number(e.target.value) : e.target.value,
+                  }),
+              }),
+            )
+          return h(
+            'div',
+            { className: 'dtc-detail' },
+            h('div', { className: 'dtc-h2' }, '设置'),
+            h(
+              'div',
+              { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', marginBottom: '12px' } },
+              '保存在本机；令牌和地址立即生效，端口改动需要重启 DSH。',
+            ),
+            field('member', '成员名（仅显示，作者由令牌决定）'),
+            field('project', '默认合作区（未绑定工作区时使用）'),
+            field('primary', '主库地址（从机填，例如 http://192.168.1.20:7420）'),
+            field('token', '我的令牌'),
+            field('adminToken', '管理员令牌（只填在主机上）'),
+            field('peerPort', '端口', { type: 'number' }),
+            h(
+              'label',
+              { style: { display: 'flex', gap: '8px', alignItems: 'center', margin: '10px 0', fontSize: '12px' } },
+              h('input', {
+                type: 'checkbox',
+                checked: settingsView.expose === true,
+                onChange: (e) => setSettingsView({ ...settingsView, expose: e.target.checked }),
+              }),
+              '允许其它机器连入（主机勾选，需重启）',
+            ),
+            h(
+              'label',
+              { style: { display: 'flex', gap: '8px', alignItems: 'center', margin: '10px 0', fontSize: '12px' } },
+              h('input', {
+                type: 'checkbox',
+                checked: settingsView.autoBrief !== false,
+                onChange: (e) => setSettingsView({ ...settingsView, autoBrief: e.target.checked }),
+              }),
+              '会话开始时注入团队简报',
+            ),
+            h(
+              'div',
+              { className: 'dtc-row' },
+              h('button', { className: 'dtc-btn dtc-btn-primary', onClick: saveSettings, disabled: settingsView.busy }, '保存'),
+              h('button', { className: 'dtc-btn', onClick: () => setSettingsView(null) }, '关闭'),
+              h('div', { className: 'dtc-spacer' }),
+              settingsView.msg
+                ? h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } }, settingsView.msg)
+                : null,
+            ),
+          )
+        }
+        if (memberView) {
+          return h(
+            'div',
+            { className: 'dtc-detail' },
+            h('div', { className: 'dtc-h2' }, '成员与令牌'),
+            h(
+              'div',
+              { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', marginBottom: '10px' } },
+              '每人一个令牌，作者由令牌推导，不能自称。令牌只显示一次，复制后发给对方填进配置。',
+            ),
+            h(
+              'div',
+              { className: 'dtc-row', style: { marginBottom: '12px' } },
+              h('input', {
+                className: 'dtc-input',
+                style: { flex: 1 },
+                placeholder: '成员名，例如 张三',
+                value: memberView.newName || '',
+                onChange: (e) => setMemberView({ ...memberView, newName: e.target.value }),
+              }),
+              h('button', { className: 'dtc-btn', onClick: addMember, disabled: memberView.busy }, '添加成员'),
+            ),
+            memberView.token
+              ? h(
+                  'div',
+                  {
+                    className: 'dtc-banner',
+                    style: {
+                      borderColor: 'var(--dsw-alias-brand-primary)',
+                      color: 'var(--dsw-alias-label-primary)',
+                    },
+                  },
+                  h('div', { style: { flex: 1, wordBreak: 'break-all' } }, '令牌：' + memberView.token),
+                  h('button', { className: 'dtc-btn', onClick: () => copy(memberView.token, '令牌已复制') }, '复制'),
+                )
+              : null,
+            memberView.msg
+              ? h('div', { style: { color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px' } }, memberView.msg)
+              : null,
+            (memberView.members || []).length
+              ? memberView.members.map((member) =>
+                  h(
+                    'div',
+                    {
+                      key: member.id,
+                      style: {
+                        display: 'flex',
+                        gap: '10px',
+                        alignItems: 'center',
+                        padding: '8px 0',
+                        borderBottom: '1px solid var(--dsw-alias-border-l1)',
+                      },
+                    },
+                    h(
+                      'div',
+                      { style: { flex: 1 } },
+                      h('div', { style: { fontWeight: 500 } }, member.name),
+                      h(
+                        'div',
+                        { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' } },
+                        member.role + ' · ' + String(member.createdAt || '').slice(0, 10),
+                      ),
+                    ),
+                    h(
+                      'button',
+                      { className: 'dtc-btn', onClick: () => rotateMember(member.id), disabled: memberView.busy },
+                      '重置令牌',
+                    ),
+                    h(
+                      'button',
+                      { className: 'dtc-btn', onClick: () => deleteMember(member.id), disabled: memberView.busy },
+                      '删除',
+                    ),
+                  ),
+                )
+              : h(
+                  'div',
+                  { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } },
+                  '还没有成员。用上面的表单创建，把令牌发给对方。',
+                ),
+          )
+        }
+        if (fileView) {
+          const pending = (fileView.files || []).filter((file) => file.status !== 'synced').length
+          return h(
+            'div',
+            { className: 'dtc-detail' },
+            h('div', { className: 'dtc-h2' }, '文件同步'),
+            h(
+              'div',
+              { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', marginBottom: '10px' } },
+              '勾选文件后：「更新」从主库下载，「上传」把本地改动推给主库。只传哈希不同的文件。',
+            ),
+            h(
+              'div',
+              { className: 'dtc-row', style: { marginBottom: '10px' } },
+              h('input', {
+                className: 'dtc-input',
+                style: { flex: 1, minWidth: '220px' },
+                value: fileView.root,
+                placeholder: '工作区目录，例如 D:\\Project\\Motor',
+                onChange: (e) => setFileView({ ...fileView, root: e.target.value }),
+              }),
+              h('button', { className: 'dtc-btn', onClick: scanFiles, disabled: fileView.busy }, '扫描'),
+              h('button', { className: 'dtc-btn', onClick: () => setFileView(null) }, '关闭'),
+            ),
+            fileView.msg
+              ? h('div', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', marginBottom: '8px' } }, fileView.msg)
+              : null,
+            fileView.files
+              ? h(
+                  'div',
+                  null,
+                  h(
+                    'div',
+                    { className: 'dtc-row', style: { marginBottom: '8px' } },
+                    h('button', { className: 'dtc-btn', onClick: () => syncFileView('pull'), disabled: fileView.busy }, '更新选中'),
+                    h('button', { className: 'dtc-btn', onClick: () => syncFileView('push'), disabled: fileView.busy }, '上传选中'),
+                    h(
+                      'button',
+                      {
+                        className: 'dtc-btn',
+                        onClick: () => {
+                          const all = {}
+                          for (const file of fileView.files) all[file.path] = true
+                          setFileView({ ...fileView, selected: all })
+                        },
+                      },
+                      '全选',
+                    ),
+                    h('div', { className: 'dtc-spacer' }),
+                    h(
+                      'span',
+                      { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } },
+                      '共 ' + fileView.files.length + ' 个，待同步 ' + pending + ' 个',
+                    ),
+                  ),
+                  fileView.files.map((file) =>
+                    h(
+                      'label',
+                      {
+                        key: file.path,
+                        style: {
+                          display: 'flex',
+                          gap: '8px',
+                          alignItems: 'center',
+                          padding: '4px 0',
+                          fontSize: '12px',
+                          borderBottom: '1px solid var(--dsw-alias-border-l1)',
+                        },
+                      },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: !!(fileView.selected && fileView.selected[file.path]),
+                        onChange: (e) => {
+                          const next = { ...(fileView.selected || {}) }
+                          next[file.path] = e.target.checked
+                          setFileView({ ...fileView, selected: next })
+                        },
+                      }),
+                      h('span', { style: { flex: 1, wordBreak: 'break-all' } }, file.path),
+                      h(
+                        'span',
+                        {
+                          style: {
+                            color:
+                              file.status === 'synced'
+                                ? 'var(--dsw-alias-state-success-primary)'
+                                : file.status === 'changed'
+                                  ? 'var(--dsw-alias-state-warn-primary)'
+                                  : 'var(--dsw-alias-label-secondary)',
+                          },
+                        },
+                        file.status === 'synced' ? '已同步' : file.status === 'changed' ? '有差异' : '仅本地',
+                      ),
+                      h(
+                        'span',
+                        { style: { color: 'var(--dsw-alias-label-secondary)', minWidth: '64px', textAlign: 'right' } },
+                        (file.size / 1024).toFixed(1) + ' KB',
+                      ),
+                    ),
+                  ),
+                )
+              : null,
+          )
+        }
         if (zoneView) {
           return h(
             'div',
@@ -610,6 +1032,9 @@ window.__ModuleLoader__.load({
             h('span', null, h('span', { className: 'dtc-dot', style: { background: dotColor } }), statusText),
           ),
           h('div', { className: 'dtc-spacer' }),
+          h('button', { className: 'dtc-btn', onClick: openSettings }, '设置'),
+          h('button', { className: 'dtc-btn', onClick: openMembers }, '成员'),
+          h('button', { className: 'dtc-btn', onClick: openFiles }, '文件'),
           h('button', { className: 'dtc-btn', onClick: openZones }, '合作区'),
           h('button', { className: 'dtc-btn', onClick: () => loadRef.current && loadRef.current() }, '刷新'),
           h(

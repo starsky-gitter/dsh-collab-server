@@ -1,4 +1,4 @@
-# dsh-team-context
+# dsh-collab-server
 
 Shared AI context for engineering teams running [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH).
 

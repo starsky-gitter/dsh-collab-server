@@ -5,12 +5,13 @@
  * team brief into the prompt, and proxies the browser panel to the hub so the
  * page never needs the team token.
  */
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { startNode } from './core.js'
 
-export const name = 'dsh-team-context'
+export const name = 'dsh-collab-server'
 
 export const inject = ['tools', 'webServer', 'systemPrompt', 'agents']
 
@@ -27,6 +28,7 @@ const DEFAULTS = {
   peerPort: 7420,
   peers: [],
   primary: '',
+  adminToken: '',
   dataDir: '',
   advertiseHost: '',
   expose: false,
@@ -101,10 +103,17 @@ function ago(iso) {
 
 export function apply(ctx, config) {
   const cfg = { ...DEFAULTS, ...(config || {}) }
-  const member = cfg.member || 'me'
+  const settingsHome = cfg.dataDir || process.env.DSH_PROFILE_DIR || path.join(os.homedir(), '.dsh')
+  const settingsProject = String(cfg.project || 'default').replace(/[^\w.-]+/g, '_')
+  const settingsFile = path.join(settingsHome, 'team-context', settingsProject, 'settings.json')
+  try {
+    Object.assign(cfg, JSON.parse(fs.readFileSync(settingsFile, 'utf8')) || {})
+  } catch {
+    // first run: no persisted settings yet
+  }
+  let member = cfg.member || os.userInfo().username || 'me'
   const remoteBase = String(cfg.hubUrl || '').replace(/\/+$/, '')
-  const configuredPeers = Array.isArray(cfg.peers) ? cfg.peers.filter(Boolean) : []
-  const peerList = [cfg.primary, ...configuredPeers]
+  let peerList = [cfg.primary, ...(Array.isArray(cfg.peers) ? cfg.peers : [])]
     .filter(Boolean)
     .filter((value, index, list) => list.indexOf(value) === index)
   // A host exposes its port so slaves can push; a slave only dials out.
@@ -198,6 +207,131 @@ export function apply(ctx, config) {
     res.end(JSON.stringify(value))
   }
 
+  // --- shared files -------------------------------------------------------
+  const SKIP_DIRS = new Set(['.git', 'node_modules', 'Objects', 'Listings', 'DebugConfig', 'RTE', '.vscode'])
+  const SKIP_FILE = /\.(o|d|crf|dep|lnp|axf|map|lst|htm|iex|bak)$/i
+  const hashCache = new Map()
+
+  function walkFiles(root) {
+    const out = []
+    const stack = [root]
+    while (stack.length) {
+      const dir = stack.pop()
+      let entries = []
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          if (!SKIP_DIRS.has(entry.name)) stack.push(full)
+        } else if (entry.isFile() && !SKIP_FILE.test(entry.name)) {
+          out.push(full)
+        }
+      }
+    }
+    return out
+  }
+
+  function hashOfFile(full, stat) {
+    const cached = hashCache.get(full)
+    if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs) return cached.hash
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex')
+    hashCache.set(full, { size: stat.size, mtime: stat.mtimeMs, hash })
+    return hash
+  }
+
+  async function fileBase() {
+    return cfg.primary ? String(cfg.primary).replace(/\/+$/, '') : await baseUrl()
+  }
+
+  async function remoteManifest(project) {
+    const base = await fileBase()
+    const res = await fetch(`${base}/api/files/${encodeURIComponent(project)}/manifest`, {
+      headers: { 'x-team-token': cfg.token },
+      signal: AbortSignal.timeout(8000),
+    })
+    if (!res.ok) throw new Error('manifest ' + res.status)
+    return (await res.json()).files || []
+  }
+
+  async function scanFiles(root, project) {
+    const remote = await remoteManifest(project).catch(() => [])
+    const remoteMap = new Map(remote.map((entry) => [entry.path, entry.hash]))
+    const files = []
+    for (const full of walkFiles(root)) {
+      const rel = path.relative(root, full).split(path.sep).join('/')
+      const stat = fs.statSync(full)
+      const hash = hashOfFile(full, stat)
+      const remoteHash = remoteMap.get(rel) || ''
+      files.push({
+        path: rel,
+        size: stat.size,
+        mtime: Math.round(stat.mtimeMs),
+        hash,
+        remoteHash,
+        status: !remoteHash ? 'local' : remoteHash === hash ? 'synced' : 'changed',
+      })
+    }
+    const manifest = files.map((file) => ({ path: file.path, hash: file.hash, size: file.size, mtime: file.mtime, by: member }))
+    await api(`/api/files/${encodeURIComponent(project)}/manifest`, { method: 'PUT', body: JSON.stringify({ files: manifest }) })
+    return files
+  }
+
+  async function syncFiles(root, project, paths, direction) {
+    const base = await fileBase()
+    const remote = await remoteManifest(project)
+    const remoteMap = new Map(remote.map((entry) => [entry.path, entry.hash]))
+    const selected = Array.isArray(paths) && paths.length ? new Set(paths) : null
+    let pulled = 0
+    let pushed = 0
+
+    if (direction !== 'push') {
+      for (const entry of remote) {
+        if (selected && !selected.has(entry.path)) continue
+        const full = path.join(root, entry.path)
+        if (fs.existsSync(full) && hashOfFile(full, fs.statSync(full)) === entry.hash) continue
+        const res = await fetch(`${base}/api/files/${encodeURIComponent(project)}/blob/${entry.hash}`, {
+          headers: { 'x-team-token': cfg.token },
+          signal: AbortSignal.timeout(60000),
+        })
+        if (!res.ok) continue
+        fs.mkdirSync(path.dirname(full), { recursive: true })
+        fs.writeFileSync(full, Buffer.from(await res.arrayBuffer()))
+        pulled += 1
+      }
+    }
+
+    const localFiles = walkFiles(root)
+    const manifest = []
+    for (const full of localFiles) {
+      const rel = path.relative(root, full).split(path.sep).join('/')
+      const stat = fs.statSync(full)
+      const hash = hashOfFile(full, stat)
+      manifest.push({ path: rel, hash, size: stat.size, mtime: Math.round(stat.mtimeMs), by: member })
+      if (direction === 'pull') continue
+      if (selected && !selected.has(rel)) continue
+      if (remoteMap.get(rel) === hash) continue
+      const res = await fetch(`${base}/api/files/${encodeURIComponent(project)}/blob/${hash}`, {
+        method: 'PUT',
+        headers: { 'x-team-token': cfg.token, 'content-type': 'application/octet-stream' },
+        body: fs.readFileSync(full),
+        signal: AbortSignal.timeout(60000),
+      })
+      if (res.ok) pushed += 1
+    }
+    if (direction !== 'pull') {
+      await fetch(`${base}/api/files/${encodeURIComponent(project)}/manifest`, {
+        method: 'PUT',
+        headers: { 'x-team-token': cfg.token, 'content-type': 'application/json' },
+        body: JSON.stringify({ files: manifest }),
+      })
+    }
+    return { pulled, pushed, total: manifest.length }
+  }
+
   async function api(pathname, init = {}) {
     const signal = AbortSignal.timeout(cfg.timeoutMs)
     const res = await fetch((await baseUrl()) + pathname, {
@@ -268,7 +402,7 @@ export function apply(ctx, config) {
       ctx.systemPrompt.context({
         name: 'team-brief',
         order: 60,
-        text: () => brief,
+        text: () => (cfg.autoBrief !== false ? brief : ''),
       }),
     )
   }
@@ -283,7 +417,7 @@ export function apply(ctx, config) {
           agent.ctx.systemPrompt.context({
             name: 'team-brief',
             order: 60,
-            text: () => briefs.get(projectOf(agent)) || '',
+            text: () => (cfg.autoBrief !== false ? briefs.get(projectOf(agent)) || '' : ''),
           }),
         )
       } catch (error) {
@@ -471,6 +605,103 @@ export function apply(ctx, config) {
   async function proxy(req, res) {
     try {
       const url = req.url || '/team-api'
+      if (url === '/team-api/settings' || url.startsWith('/team-api/settings?')) {
+        if (req.method === 'GET') {
+          return sendJson(res, 200, {
+            project: cfg.project,
+            member,
+            primary: cfg.primary || '',
+            token: cfg.token || '',
+            adminToken: cfg.adminToken || '',
+            peerPort: Number(cfg.peerPort) || 7420,
+            expose: cfg.expose === true,
+            autoBrief: cfg.autoBrief !== false,
+            briefLimit: Number(cfg.briefLimit) || 8,
+            peers: Array.isArray(cfg.peers) ? cfg.peers : [],
+          })
+        }
+        if (req.method === 'POST') {
+          let body = {}
+          try {
+            body = JSON.parse((await readRaw(req)) || '{}')
+          } catch {
+            body = {}
+          }
+          const portChanged = body.peerPort !== undefined && Number(body.peerPort) !== Number(cfg.peerPort)
+          const exposeChanged = body.expose !== undefined && Boolean(body.expose) !== Boolean(cfg.expose)
+          for (const key of ['project', 'member', 'primary', 'token', 'adminToken', 'peerPort', 'briefLimit']) {
+            if (body[key] !== undefined) cfg[key] = body[key]
+          }
+          if (body.expose !== undefined) cfg.expose = body.expose === true
+          if (body.autoBrief !== undefined) cfg.autoBrief = body.autoBrief !== false
+          if (Array.isArray(body.peers)) cfg.peers = body.peers.filter(Boolean)
+          if (!cfg.member) cfg.member = os.userInfo().username || 'me'
+          member = cfg.member
+          peerList = [cfg.primary, ...(Array.isArray(cfg.peers) ? cfg.peers : [])]
+            .filter(Boolean)
+            .filter((value, index, list) => list.indexOf(value) === index)
+          if (node) node.setPeers(peerList)
+          fs.mkdirSync(path.dirname(settingsFile), { recursive: true })
+          fs.writeFileSync(
+            settingsFile,
+            JSON.stringify(
+              {
+                project: cfg.project,
+                member: cfg.member,
+                primary: cfg.primary,
+                token: cfg.token,
+                adminToken: cfg.adminToken,
+                peerPort: cfg.peerPort,
+                expose: cfg.expose === true,
+                autoBrief: cfg.autoBrief,
+                briefLimit: cfg.briefLimit,
+                peers: cfg.peers,
+              },
+              null,
+              2,
+            ),
+          )
+          refreshBrief()
+          return sendJson(res, 200, { ok: true, restartRequired: portChanged || exposeChanged })
+        }
+        return sendJson(res, 405, { error: 'method not allowed' })
+      }
+      if (url.startsWith('/team-api/admin/members')) {
+        const suffix = url.slice('/team-api/admin/members'.length).split('?')[0]
+        const target = (await baseUrl()) + '/api/team/members' + suffix
+        const init = { method: req.method, headers: { 'x-team-token': cfg.adminToken || cfg.token } }
+        if (req.method !== 'GET' && req.method !== 'DELETE') {
+          init.body = await readRaw(req)
+          init.headers['content-type'] = 'application/json'
+        }
+        const upstream = await fetch(target, init)
+        const text = await upstream.text()
+        res.writeHead(upstream.status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(text)
+        return
+      }
+      if (url.startsWith('/team-api/files/')) {
+        const action = url.split('?')[0].replace('/team-api/files/', '')
+        let body = {}
+        try {
+          body = JSON.parse((await readRaw(req)) || '{}')
+        } catch {
+          body = {}
+        }
+        const root = typeof body.root === 'string' ? body.root : ''
+        const project = String(body.project || cfg.project)
+        if (!root || !fs.existsSync(root)) return sendJson(res, 400, { error: '目录不存在：' + root })
+        if (req.method === 'POST' && action === 'scan') {
+          const files = await scanFiles(root, project)
+          return sendJson(res, 200, { project, root, files })
+        }
+        if (req.method === 'POST' && action === 'sync') {
+          const direction = body.direction === 'push' ? 'push' : body.direction === 'pull' ? 'pull' : 'both'
+          const result = await syncFiles(root, project, body.paths, direction)
+          return sendJson(res, 200, { project, root, ...result })
+        }
+        return sendJson(res, 405, { error: 'unsupported file action' })
+      }
       if (url === '/team-api/zones' || url.startsWith('/team-api/zones?')) {
         if (req.method === 'GET') {
           const query = new URL(url, 'http://local').searchParams
@@ -528,6 +759,7 @@ export function apply(ctx, config) {
         const body = JSON.stringify({
           project: cfg.project,
           projects: [...new Set([cfg.project, ...Object.values(zones)])],
+          zones: Object.entries(zones).map(([cwd, project]) => ({ cwd, project })),
           member,
           hubUrl: current,
           online,

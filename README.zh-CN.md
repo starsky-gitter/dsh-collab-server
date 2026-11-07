@@ -1,4 +1,4 @@
-# dsh-team-context
+# dsh-collab-server
 
 给使用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的工程团队共享 AI 上下文。
 

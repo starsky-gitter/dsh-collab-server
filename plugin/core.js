@@ -389,6 +389,44 @@ export async function startNode(options = {}) {
     return [...map.values()].sort((a, b) => b.records - a.records)
   }
 
+  const filesDir = path.join(dataDir, 'files')
+  const filesIndexFile = path.join(dataDir, 'files.json')
+  fs.mkdirSync(filesDir, { recursive: true })
+  /** @type {Record<string, Array<{ path: string, hash: string, size: number, mtime: number, by: string }>>} */
+  let fileIndex = {}
+  try {
+    fileIndex = JSON.parse(fs.readFileSync(filesIndexFile, 'utf8')) || {}
+  } catch {
+    fileIndex = {}
+  }
+  function saveFileIndex() {
+    fs.writeFileSync(filesIndexFile, JSON.stringify(fileIndex, null, 2))
+  }
+
+  // --- members: one token per person --------------------------------------
+  const membersFile = path.join(dataDir, 'members.json')
+  /** @type {Array<{ id: string, name: string, role: string, tokenHash: string, createdAt: string, disabled?: boolean }>} */
+  let members = []
+  try {
+    const raw = JSON.parse(fs.readFileSync(membersFile, 'utf8'))
+    members = Array.isArray(raw.members) ? raw.members : []
+  } catch {
+    members = []
+  }
+  function saveMembers() {
+    fs.writeFileSync(membersFile, JSON.stringify({ members }, null, 2))
+  }
+  const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex')
+  function authOf(req) {
+    const presented = String(req.headers['x-team-token'] || '')
+    if (!presented) return null
+    // The shared token stays the peer/admin secret so nodes can still sync.
+    if (presented === token) return { id: 'admin', name: 'admin', role: 'admin' }
+    const hash = sha256(presented)
+    const member = members.find((entry) => entry.tokenHash === hash && !entry.disabled)
+    return member ? { id: member.id, name: member.name, role: member.role || 'member' } : null
+  }
+
   // --- HTTP ---------------------------------------------------------------
   function send(res, code, value) {
     const body = JSON.stringify(value)
@@ -429,11 +467,6 @@ export async function startNode(options = {}) {
     })
   }
 
-  function authorized(req) {
-    if (!token) return true
-    return req.headers['x-team-token'] === token
-  }
-
   function normalizedRecord(input, by) {
     return {
       id: 'r_' + Date.now().toString(36) + crypto.randomBytes(2).toString('hex'),
@@ -461,7 +494,69 @@ export async function startNode(options = {}) {
       if (pathname === '/api/health') {
         return send(res, 200, { ok: true, node: nodeId, records: records.size, events: events.length, peers: peers.length })
       }
-      if (!authorized(req)) return send(res, 401, { error: 'invalid team token' })
+      const auth = authOf(req)
+      if (!auth) return send(res, 401, { error: 'invalid team token' })
+
+      if (pathname === '/api/team/members') {
+        if (auth.role !== 'admin') return send(res, 403, { error: 'admin only' })
+        if (req.method === 'GET') {
+          return send(res, 200, {
+            members: members.map((entry) => ({
+              id: entry.id,
+              name: entry.name,
+              role: entry.role,
+              createdAt: entry.createdAt,
+              disabled: Boolean(entry.disabled),
+            })),
+            delegated: members.length > 0,
+          })
+        }
+        if (req.method === 'POST') {
+          const body = await readBody(req)
+          const name = clip(String(body.name || '').trim(), 60)
+          if (!name) return send(res, 400, { error: 'name is required' })
+          if (members.some((entry) => entry.name === name && !entry.disabled)) {
+            return send(res, 409, { error: 'member already exists' })
+          }
+          const plain = crypto.randomBytes(18).toString('base64url')
+          const member = {
+            id: 'm_' + crypto.randomBytes(4).toString('hex'),
+            name,
+            role: body.role === 'admin' ? 'admin' : 'member',
+            tokenHash: sha256(plain),
+            createdAt: new Date().toISOString(),
+            disabled: false,
+          }
+          members.push(member)
+          saveMembers()
+          return send(res, 201, {
+            member: { id: member.id, name: member.name, role: member.role, createdAt: member.createdAt },
+            token: plain,
+          })
+        }
+      }
+
+      const memberRoute = pathname.match(/^\/api\/team\/members\/([A-Za-z0-9_]+)$/)
+      if (memberRoute && req.method === 'DELETE') {
+        if (auth.role !== 'admin') return send(res, 403, { error: 'admin only' })
+        const index = members.findIndex((entry) => entry.id === memberRoute[1])
+        if (index === -1) return send(res, 404, { error: 'not found' })
+        members.splice(index, 1)
+        saveMembers()
+        return send(res, 200, { ok: true })
+      }
+
+      const tokenRoute = pathname.match(/^\/api\/team\/members\/([A-Za-z0-9_]+)\/token$/)
+      if (tokenRoute && req.method === 'POST') {
+        if (auth.role !== 'admin') return send(res, 403, { error: 'admin only' })
+        const member = members.find((entry) => entry.id === tokenRoute[1])
+        if (!member) return send(res, 404, { error: 'not found' })
+        const plain = crypto.randomBytes(18).toString('base64url')
+        member.tokenHash = sha256(plain)
+        member.disabled = false
+        saveMembers()
+        return send(res, 200, { token: plain })
+      }
 
       if (req.method === 'POST' && pathname === '/api/sync') {
         const body = await readBody(req)
@@ -499,7 +594,7 @@ export async function startNode(options = {}) {
         const input = await readBody(req)
         if (!String(input.title || '').trim()) return send(res, 400, { error: 'title is required' })
         if (!String(input.body || '').trim()) return send(res, 400, { error: 'body is required' })
-        const by = req.headers['x-team-member'] || input.author || 'anonymous'
+        const by = auth.name
         const record = normalizedRecord(input, by)
         appendLocal({ type: 'record', by, record })
         if (input.status === 'verified') {
@@ -515,7 +610,7 @@ export async function startNode(options = {}) {
         if (req.method === 'GET') return send(res, 200, { record })
         if (req.method === 'PATCH') {
           const patch = await readBody(req)
-          const by = req.headers['x-team-member'] || record.author
+          const by = auth.name
           if (patch.status !== undefined) {
             if (!STATUSES.has(patch.status)) return send(res, 400, { error: 'invalid status' })
             appendLocal({ type: 'status', id: record.id, status: patch.status, by, note: patch.note })
@@ -530,6 +625,63 @@ export async function startNode(options = {}) {
       }
       if (req.method === 'GET' && pathname === '/api/members') {
         return send(res, 200, { members: membersData(url.searchParams.get('project') || '') })
+      }
+
+      // Shared files: a manifest per project plus content-addressed blobs.
+      const manifestRoute = pathname.match(/^\/api\/files\/([^/]+)\/manifest$/)
+      if (manifestRoute) {
+        const project = decodeURIComponent(manifestRoute[1])
+        if (req.method === 'GET') {
+          return send(res, 200, { project, files: fileIndex[project] || [] })
+        }
+        if (req.method === 'PUT') {
+          const body = await readBody(req)
+          const list = Array.isArray(body.files) ? body.files : []
+          const merged = new Map((fileIndex[project] || []).map((entry) => [entry.path, entry]))
+          for (const entry of list) {
+            if (!entry || typeof entry.path !== 'string' || typeof entry.hash !== 'string') continue
+            merged.set(entry.path, {
+              path: entry.path,
+              hash: entry.hash,
+              size: Number(entry.size) || 0,
+              mtime: Number(entry.mtime) || 0,
+              by: String(entry.by || ''),
+            })
+          }
+          fileIndex[project] = [...merged.values()]
+          saveFileIndex()
+          return send(res, 200, { project, files: fileIndex[project] })
+        }
+      }
+
+      const blobRoute = pathname.match(/^\/api\/files\/([^/]+)\/blob\/([a-f0-9]{64})$/)
+      if (blobRoute) {
+        const hash = blobRoute[2]
+        const target = path.join(filesDir, hash)
+        if (req.method === 'GET') {
+          if (!fs.existsSync(target)) return send(res, 404, { error: 'blob not found' })
+          const stat = fs.statSync(target)
+          res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': stat.size })
+          fs.createReadStream(target).pipe(res)
+          return
+        }
+        if (req.method === 'PUT') {
+          const chunks = []
+          let size = 0
+          for await (const chunk of req) {
+            size += chunk.length
+            if (size > 512 * 1024 * 1024) {
+              req.destroy()
+              return send(res, 413, { error: 'blob too large' })
+            }
+            chunks.push(chunk)
+          }
+          const buffer = Buffer.concat(chunks)
+          const actual = crypto.createHash('sha256').update(buffer).digest('hex')
+          if (actual !== hash) return send(res, 400, { error: 'hash mismatch' })
+          fs.writeFileSync(target, buffer)
+          return send(res, 200, { hash, size: buffer.length })
+        }
       }
 
       return send(res, 404, { error: 'not found' })
