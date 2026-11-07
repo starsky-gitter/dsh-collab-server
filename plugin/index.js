@@ -309,14 +309,15 @@ export function apply(ctx, config) {
     return hash
   }
 
-  async function fileBase() {
-    return cfg.primary ? String(cfg.primary).replace(/\/+$/, '') : await baseUrl()
+  async function fileEndpoint() {
+    if (cfg.primary) return { base: String(cfg.primary).replace(/\/+$/, ''), token: cfg.token }
+    return { base: await baseUrl(), token: localSecret }
   }
 
   async function remoteManifest(project) {
-    const base = await fileBase()
+    const { base, token } = await fileEndpoint()
     const res = await fetch(`${base}/api/files/${encodeURIComponent(project)}/manifest`, {
-      headers: { 'x-team-token': cfg.token },
+      headers: { 'x-team-token': token },
       signal: AbortSignal.timeout(8000),
     })
     if (!res.ok) throw new Error('manifest ' + res.status)
@@ -343,11 +344,27 @@ export function apply(ctx, config) {
     }
     const manifest = files.map((file) => ({ path: file.path, hash: file.hash, size: file.size, mtime: file.mtime, by: member }))
     await api(`/api/files/${encodeURIComponent(project)}/manifest`, { method: 'PUT', body: JSON.stringify({ files: manifest }) })
+    // Publish the blobs this node does not have yet, so peers can pull them.
+    const localBase = await baseUrl()
+    for (const file of files) {
+      const head = await fetch(`${localBase}/api/files/${encodeURIComponent(project)}/blob/${file.hash}`, {
+        method: 'HEAD',
+        headers: { 'x-team-token': localSecret },
+        signal: AbortSignal.timeout(5000),
+      })
+      if (head.ok) continue
+      await fetch(`${localBase}/api/files/${encodeURIComponent(project)}/blob/${file.hash}`, {
+        method: 'PUT',
+        headers: { 'x-team-token': localSecret, 'content-type': 'application/octet-stream' },
+        body: fs.readFileSync(path.join(root, file.path)),
+        signal: AbortSignal.timeout(60000),
+      })
+    }
     return files
   }
 
   async function syncFiles(root, project, paths, direction) {
-    const base = await fileBase()
+    const { base, token } = await fileEndpoint()
     const remote = await remoteManifest(project)
     const remoteMap = new Map(remote.map((entry) => [entry.path, entry.hash]))
     const selected = Array.isArray(paths) && paths.length ? new Set(paths) : null
@@ -360,7 +377,7 @@ export function apply(ctx, config) {
         const full = path.join(root, entry.path)
         if (fs.existsSync(full) && hashOfFile(full, fs.statSync(full)) === entry.hash) continue
         const res = await fetch(`${base}/api/files/${encodeURIComponent(project)}/blob/${entry.hash}`, {
-          headers: { 'x-team-token': cfg.token },
+          headers: { 'x-team-token': token },
           signal: AbortSignal.timeout(60000),
         })
         if (!res.ok) continue
@@ -382,7 +399,7 @@ export function apply(ctx, config) {
       if (remoteMap.get(rel) === hash) continue
       const res = await fetch(`${base}/api/files/${encodeURIComponent(project)}/blob/${hash}`, {
         method: 'PUT',
-        headers: { 'x-team-token': cfg.token, 'content-type': 'application/octet-stream' },
+        headers: { 'x-team-token': token, 'content-type': 'application/octet-stream' },
         body: fs.readFileSync(full),
         signal: AbortSignal.timeout(60000),
       })
@@ -391,7 +408,7 @@ export function apply(ctx, config) {
     if (direction !== 'pull') {
       await fetch(`${base}/api/files/${encodeURIComponent(project)}/manifest`, {
         method: 'PUT',
-        headers: { 'x-team-token': cfg.token, 'content-type': 'application/json' },
+        headers: { 'x-team-token': token, 'content-type': 'application/json' },
         body: JSON.stringify({ files: manifest }),
       })
     }
@@ -653,12 +670,12 @@ export function apply(ctx, config) {
     ctx.tools.register({
       name: 'team_review',
       description:
-        'Change the review state of a record you own. Verification is a human action in the panel, so this tool cannot set verified: use it to mark a record stale or superseded when it no longer matches reality.',
+        'Mark a record stale or superseded when it no longer matches reality. Verification and restoring a record to draft are human actions in the panel; this tool cannot do either.',
       parameters: {
         type: 'object',
         properties: {
           id: { type: 'string' },
-          status: { type: 'string', enum: ['draft', 'stale', 'superseded'] },
+          status: { type: 'string', enum: ['stale', 'superseded'] },
           note: { type: 'string', description: 'Why the status changed.' },
         },
         required: ['id', 'status'],
@@ -705,6 +722,8 @@ export function apply(ctx, config) {
             peers: Array.isArray(cfg.peers) ? cfg.peers : [],
             advertise: node ? node.advertised : '',
             node: node ? node.nodeId : '',
+            peers: node ? node.peerState() : [],
+            lastSync: node ? node.lastSync() : null,
           })
         }
         if (req.method === 'POST') {
@@ -767,7 +786,7 @@ export function apply(ctx, config) {
         res.end(text)
         return
       }
-      if (url.startsWith('/team-api/files/')) {
+      if (url.startsWith('/team-api/files/') && req.method === 'POST') {
         const action = url.split('?')[0].replace('/team-api/files/', '')
         let body = {}
         try {

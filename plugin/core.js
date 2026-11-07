@@ -696,6 +696,16 @@ export async function startNode(options = {}) {
       if (blobRoute) {
         const hash = blobRoute[2]
         const target = path.join(filesDir, hash)
+        if (req.method === 'HEAD') {
+          if (!fs.existsSync(target)) {
+            res.writeHead(404)
+            res.end()
+            return
+          }
+          res.writeHead(200, { 'content-length': fs.statSync(target).size })
+          res.end()
+          return
+        }
         if (req.method === 'GET') {
           if (!fs.existsSync(target)) return send(res, 404, { error: 'blob not found' })
           const stat = fs.statSync(target)

@@ -465,7 +465,7 @@ window.__ModuleLoader__.load({
       async function unbindZone(cwd) {
         try {
           await api('/zones', { method: 'DELETE', body: JSON.stringify({ cwd }) })
-          setZoneView(await api('/zones'))
+          await openZones()
           setToast('已解除绑定')
         } catch (e) {
           setError(String((e && e.message) || e))
@@ -620,6 +620,25 @@ window.__ModuleLoader__.load({
             field('adminToken', '管理员令牌（只填在主机上）'),
             field('peerPort', '端口', { type: 'number' }),
             h(
+              'div',
+              { style: { margin: '12px 0', padding: '10px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px', fontSize: '12px', lineHeight: 1.7 } },
+              h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '同步状态'),
+              h('div', null, '本机节点：' + (settingsView.node || '未启动')),
+              h(
+                'div',
+                null,
+                '对端：' +
+                  ((settingsView.peers || []).length
+                    ? settingsView.peers
+                        .map((peer) => peer.url + (peer.online ? ' 在线' : ' 离线') + ' 待同步 ' + peer.pending + (peer.lastError ? ' / ' + peer.lastError : ''))
+                        .join('；')
+                    : '无（主机为空是正常的，从机应显示主库地址）'),
+              ),
+              settingsView.lastSync
+                ? h('div', null, '上次同步：' + (settingsView.lastSync.at || '从未') + '，成功 ' + settingsView.lastSync.ok + ' 失败 ' + settingsView.lastSync.failed)
+                : null,
+            ),
+            h(
               'label',
               { style: { display: 'flex', gap: '8px', alignItems: 'center', margin: '10px 0', fontSize: '12px' } },
               h('input', {
@@ -644,6 +663,32 @@ window.__ModuleLoader__.load({
               { className: 'dtc-row' },
               h('button', { className: 'dtc-btn dtc-btn-primary', onClick: saveSettings, disabled: settingsView.busy }, '保存'),
               h('button', { className: 'dtc-btn', onClick: () => setSettingsView(null) }, '关闭'),
+              h(
+                'button',
+                {
+                  className: 'dtc-btn',
+                  onClick: () =>
+                    copy(
+                      JSON.stringify(
+                        {
+                          project: settingsView.project,
+                          member: settingsView.member,
+                          primary: settingsView.primary,
+                          peerPort: settingsView.peerPort,
+                          expose: settingsView.expose,
+                          node: settingsView.node,
+                          advertise: settingsView.advertise,
+                          peers: settingsView.peers,
+                          lastSync: settingsView.lastSync,
+                        },
+                        null,
+                        2,
+                      ),
+                      '诊断信息已复制',
+                    ),
+                },
+                '复制诊断',
+              ),
               h('div', { className: 'dtc-spacer' }),
               settingsView.msg
                 ? h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } }, settingsView.msg)
@@ -847,44 +892,78 @@ window.__ModuleLoader__.load({
               { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', marginBottom: '14px' } },
               '把工作区绑定到合作区后，该目录下的所有会话共享同一个记录池。',
             ),
-            zoneView.zones && zoneView.zones.length
-              ? zoneView.zones.map((zone) =>
+            (() => {
+              const grouped = {}
+              for (const binding of zoneView.zones || []) {
+                if (!grouped[binding.project]) grouped[binding.project] = []
+                grouped[binding.project].push(binding.cwd)
+              }
+              const names = [...new Set([...(zoneView.available || []), ...Object.keys(grouped)])]
+              if (!names.length) {
+                return h(
+                  'div',
+                  { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } },
+                  '还没有合作区。先在主机上创建一个，再把工作区绑进去。',
+                )
+              }
+              return names.map((name) =>
+                h(
+                  'div',
+                  { key: name, style: { marginTop: '12px' } },
                   h(
                     'div',
-                    {
-                      key: zone.cwd,
-                      style: {
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '10px',
-                        padding: '10px 0',
-                        borderBottom: '1px solid var(--dsw-alias-border-l1)',
-                      },
-                    },
+                    { style: { display: 'flex', alignItems: 'baseline', gap: '8px' } },
+                    h('div', { style: { fontWeight: 600 } }, name),
                     h(
-                      'div',
-                      { style: { flex: 1, minWidth: 0 } },
-                      h('div', { style: { fontWeight: 500 } }, zone.project),
-                      h(
+                      'span',
+                      { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' } },
+                      (grouped[name] || []).length + ' 个工作区',
+                    ),
+                  ),
+                  (grouped[name] || []).length
+                    ? grouped[name].map((cwd) =>
+                        h(
+                          'div',
+                          {
+                            key: cwd,
+                            style: {
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '10px',
+                              padding: '6px 0 6px 12px',
+                              borderBottom: '1px solid var(--dsw-alias-border-l1)',
+                            },
+                          },
+                          h(
+                            'div',
+                            {
+                              style: {
+                                flex: 1,
+                                minWidth: 0,
+                                fontSize: '12px',
+                                wordBreak: 'break-all',
+                                color: 'var(--dsw-alias-label-secondary)',
+                              },
+                            },
+                            cwd,
+                          ),
+                          h('button', { className: 'dtc-btn', onClick: () => unbindZone(cwd) }, '解除'),
+                        ),
+                      )
+                    : h(
                         'div',
                         {
                           style: {
                             fontSize: '11px',
                             color: 'var(--dsw-alias-label-secondary)',
-                            wordBreak: 'break-all',
+                            padding: '6px 0 0 12px',
                           },
                         },
-                        zone.cwd,
+                        '还没有工作区绑定到这个名字',
                       ),
-                    ),
-                    h('button', { className: 'dtc-btn', onClick: () => unbindZone(zone.cwd) }, '解除绑定'),
-                  ),
-                )
-              : h(
-                  'div',
-                  { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } },
-                  '还没有绑定任何工作区。在会话 "..." 菜单里点「加入团队合作区」。',
                 ),
+              )
+            })(),
             h(
               'div',
               { style: { marginTop: '18px', paddingTop: '14px', borderTop: '1px solid var(--dsw-alias-border-l1)' } },
