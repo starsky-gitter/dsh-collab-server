@@ -130,7 +130,7 @@ export async function startNode(options = {}) {
   const token = options.token ?? 'dev-token'
   const adminToken = options.adminToken || token
   const peerToken = options.peerToken || adminToken
-  const localName = String(options.localName || 'admin')
+  let localName = String(options.localName || 'admin')
   const host = options.host ?? '127.0.0.1'
   const requestedPort = Number(options.port ?? DEFAULT_PEER_PORT)
   let peers = Array.isArray(options.peers) ? options.peers.filter(Boolean) : []
@@ -557,6 +557,10 @@ export async function startNode(options = {}) {
         return send(res, 200, { zones: zoneNames() })
       }
 
+      if (req.method === 'GET' && pathname === '/api/team/whoami') {
+        return send(res, 200, { name: auth.name, role: auth.role, id: auth.id })
+      }
+
       if (pathname === '/api/team/members') {
         if (req.method === 'GET') {
           return send(res, 200, {
@@ -893,6 +897,10 @@ export async function startNode(options = {}) {
     digest: currentDigest,
     syncNow,
     lastSync: () => lastSync,
+    setLocalName: (name) => {
+      if (name) localName = String(name)
+      return localName
+    },
     peerState: () => [...peerState.values()].map((state) => ({ ...state, pending: pendingFor(state) })),
     setPeers: (list) => {
       peers = Array.isArray(list) ? list.filter(Boolean) : []

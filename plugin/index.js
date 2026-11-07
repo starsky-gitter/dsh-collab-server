@@ -210,6 +210,21 @@ export function apply(ctx, config) {
       })
         .then((started) => {
           node = started
+          if (cfg.primary) {
+            const origin = String(cfg.primary).replace(/\/+$/, '')
+            fetch(origin + '/api/team/whoami', {
+              headers: { 'x-team-token': cfg.token },
+              signal: AbortSignal.timeout(5000),
+            })
+              .then((res) => (res.ok ? res.json() : null))
+              .then((data) => {
+                if (data && data.name && data.name !== 'anonymous') {
+                  started.setLocalName(data.name)
+                  member = data.name
+                }
+              })
+              .catch(() => {})
+          }
           return started
         })
         .catch((error) => {
