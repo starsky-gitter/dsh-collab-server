@@ -13,7 +13,7 @@ import { startNode } from './core.js'
 
 export const name = 'dsh-collab-server'
 
-export const inject = ['tools', 'webServer', 'systemPrompt', 'agents']
+export const inject = ['tools', 'webServer', 'systemPrompt']
 
 const DEFAULTS = {
   hubUrl: 'http://127.0.0.1:7420',
@@ -240,21 +240,6 @@ export function apply(ctx, config) {
     fs.writeFileSync(zonesFile, JSON.stringify(zones, null, 2))
   }
 
-  // Sessions bound without a resolvable workspace path: the session still joins
-  // the zone, and its later turns resolve through the session id.
-  const sessionZonesFile = path.join(localDataDir(), 'session-zones.json')
-  /** @type {Record<string, string>} */
-  let sessionZones = {}
-  try {
-    sessionZones = JSON.parse(fs.readFileSync(sessionZonesFile, 'utf8')) || {}
-  } catch {
-    sessionZones = {}
-  }
-  function saveSessionZones() {
-    fs.mkdirSync(path.dirname(sessionZonesFile), { recursive: true })
-    fs.writeFileSync(sessionZonesFile, JSON.stringify(sessionZones, null, 2))
-  }
-
   function cwdOf(agent) {
     try {
       const session = agent && agent.session
@@ -275,8 +260,6 @@ export function apply(ctx, config) {
   }
 
   function projectOf(agent) {
-    const id = agent && agent.id ? String(agent.id) : ''
-    if (id && sessionZones[id]) return sessionZones[id]
     const cwd = cwdOf(agent)
     return (cwd && zones[cwd]) || cfg.project
   }
@@ -832,20 +815,9 @@ export function apply(ctx, config) {
       }
       if (url === '/team-api/zones' || url.startsWith('/team-api/zones?')) {
         if (req.method === 'GET') {
-          const query = new URL(url, 'http://local').searchParams
-          const sessionId = query.get('sessionId')
-          let current = null
-          if (sessionId) {
-            const agent = ctx.agents.get(sessionId)
-            const cwd = agent ? cwdOf(agent) : ''
-            const bound = sessionZones[sessionId] || (cwd ? zones[cwd] : '')
-            if (bound) current = { cwd, project: bound, bound: true }
-          }
           return sendJson(res, 200, {
             zones: Object.entries(zones).map(([cwd, project]) => ({ cwd, project })),
-            sessions: Object.entries(sessionZones).map(([sessionId, project]) => ({ sessionId, project })),
             defaultProject: cfg.project,
-            current,
           })
         }
         if (req.method === 'POST') {
@@ -855,29 +827,10 @@ export function apply(ctx, config) {
           } catch {
             body = {}
           }
-          let cwd = typeof body.cwd === 'string' ? body.cwd : ''
-          let agentFound = false
-          if (!cwd && body.sessionId) {
-            const agent = ctx.agents.get(body.sessionId)
-            agentFound = Boolean(agent)
-            cwd = agent ? cwdOf(agent) : ''
-          }
+          const cwd = typeof body.cwd === 'string' ? body.cwd.trim() : ''
           const project = String(body.project || (cwd ? path.basename(cwd) : '')).trim()
+          if (!cwd) return sendJson(res, 400, { error: '缺少工作区路径' })
           if (!project) return sendJson(res, 400, { error: '缺少合作区名' })
-          if (!cwd) {
-            // The workspace path is unavailable for this session (blank session,
-            // or an agent the registry no longer holds). Bind the session itself.
-            if (body.sessionId) {
-              sessionZones[String(body.sessionId)] = project
-              saveSessionZones()
-              refreshBrief()
-              return sendJson(res, 201, { session: true, project })
-            }
-            return sendJson(res, 400, {
-              error: '无法确定工作区路径',
-              detail: { sessionId: body.sessionId || null, agentFound },
-            })
-          }
           zones[cwd] = project
           saveZones()
           refreshBrief()
@@ -889,12 +842,6 @@ export function apply(ctx, config) {
             body = JSON.parse((await readRaw(req)) || '{}')
           } catch {
             body = {}
-          }
-          if (body.sessionId && sessionZones[body.sessionId]) {
-            delete sessionZones[body.sessionId]
-            saveSessionZones()
-            refreshBrief()
-            return sendJson(res, 200, { ok: true })
           }
           if (body.cwd && zones[body.cwd]) {
             delete zones[body.cwd]
