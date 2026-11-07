@@ -559,6 +559,22 @@ window.__ModuleLoader__.load({
               { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', marginBottom: '12px' } },
               '保存在本机；令牌和地址立即生效，端口改动需要重启 DSH。',
             ),
+            settingsView.advertise
+              ? h(
+                  'div',
+                  { className: 'dtc-row', style: { marginBottom: '10px' } },
+                  h(
+                    'div',
+                    { style: { flex: 1, fontSize: '12px', wordBreak: 'break-all', color: 'var(--dsw-alias-label-secondary)' } },
+                    '本机地址：' + settingsView.advertise,
+                  ),
+                  h(
+                    'button',
+                    { className: 'dtc-btn', onClick: () => copy(settingsView.advertise, '已复制本机地址') },
+                    '复制',
+                  ),
+                )
+              : null,
             field('member', '成员名（仅显示，作者由令牌决定）'),
             field('project', '默认合作区（未绑定工作区时使用）'),
             field('primary', '主库地址（从机填，例如 http://192.168.1.20:7420）'),
@@ -1013,7 +1029,9 @@ window.__ModuleLoader__.load({
             ? 'var(--dsw-alias-state-warn-primary)'
             : 'var(--dsw-alias-state-success-primary)'
       const statusText = cfg
-        ? (cfg.primary ? '主库 ' + cfg.primary : cfg.embedded ? '本机节点' : cfg.hubUrl) +
+        ? (cfg.primary
+            ? '主库 ' + cfg.primary
+            : '本机 ' + ((sync && sync.advertise) || cfg.hubUrl || '')) +
           (pending > 0 ? ' · 待同步 ' + pending : ' · 已同步') +
           ' · ' + cfg.project + ' · ' + cfg.member
         : '正在读取配置…'

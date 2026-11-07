@@ -1,6 +1,6 @@
 {
   "name": "dsh-collab-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "团队共享 AI 上下文：把结论拆成单条记录，AI 按需检索，Web 面板审核。",

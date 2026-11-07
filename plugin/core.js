@@ -128,6 +128,9 @@ export async function startNode(options = {}) {
   fs.mkdirSync(dataDir, { recursive: true })
 
   const token = options.token ?? 'dev-token'
+  const adminToken = options.adminToken || token
+  const peerToken = options.peerToken || adminToken
+  const localName = String(options.localName || 'admin')
   const host = options.host ?? '127.0.0.1'
   const requestedPort = Number(options.port ?? DEFAULT_PEER_PORT)
   let peers = Array.isArray(options.peers) ? options.peers.filter(Boolean) : []
@@ -420,8 +423,10 @@ export async function startNode(options = {}) {
   function authOf(req) {
     const presented = String(req.headers['x-team-token'] || '')
     if (!presented) return null
-    // The shared token stays the peer/admin secret so nodes can still sync.
-    if (presented === token) return { id: 'admin', name: 'admin', role: 'admin' }
+    // The shared secret is the admin and peer credential; the per-instance
+    // token only lets this machine's own plugin talk to its embedded node.
+    if (presented === adminToken) return { id: 'admin', name: 'admin', role: 'admin' }
+    if (presented === token) return { id: 'local', name: localName, role: 'admin' }
     const hash = sha256(presented)
     const member = members.find((entry) => entry.tokenHash === hash && !entry.disabled)
     return member ? { id: member.id, name: member.name, role: member.role || 'member' } : null
@@ -712,7 +717,7 @@ export async function startNode(options = {}) {
   async function postSync(peer, payload) {
     const res = await fetch(peer + '/api/sync', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-team-token': token },
+      headers: { 'content-type': 'application/json', 'x-team-token': peerToken },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(5000),
     })
@@ -827,7 +832,10 @@ export async function startNode(options = {}) {
     peers: () => peers.slice(),
     close: async () => {
       clearInterval(timer)
-      await new Promise((resolve) => server.close(() => resolve(undefined)))
+      await new Promise((resolve) => {
+        server.close(() => resolve(undefined))
+        server.closeAllConnections?.()
+      })
     },
   }
 }

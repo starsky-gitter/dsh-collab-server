@@ -26,6 +26,10 @@ const dirA = tempDir()
 const dirB = tempDir()
 let A = null
 let B = null
+let hostNode = null
+let slaveNode = null
+const dirHost = tempDir()
+const dirSlave = tempDir()
 
 try {
   A = await startNode({ dataDir: dirA, port: 0, host: '127.0.0.1', token: TOKEN, syncMs: 60000 })
@@ -166,6 +170,46 @@ try {
   const afterDelete = await fetch(A.url + '/api/records', { headers: { 'x-team-token': rotated.token } })
   assert(afterDelete.status === 401, 'a deleted member cannot authenticate')
 
+  // split credentials: local token authenticates the embedded node, the member
+  // token authenticates against the host and survives the slave's own 401 trap
+  hostNode = await startNode({
+    dataDir: dirHost,
+    port: 0,
+    host: '127.0.0.1',
+    token: 'local-host',
+    adminToken: 'shared-secret',
+    peerToken: 'shared-secret',
+    syncMs: 60000,
+  })
+  const memberToken = await (
+    await fetch(hostNode.url + '/api/team/members', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-team-token': 'shared-secret' },
+      body: JSON.stringify({ name: 'bob' }),
+    })
+  ).json()
+  slaveNode = await startNode({
+    dataDir: dirSlave,
+    port: 0,
+    host: '127.0.0.1',
+    token: 'local-slave',
+    adminToken: memberToken.token,
+    peerToken: memberToken.token,
+    localName: 'bob',
+    syncMs: 60000,
+  })
+  const slaveWrite = await fetch(slaveNode.url + '/api/records', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-team-token': 'local-slave' },
+    body: JSON.stringify({ project: 'demo', kind: 'fact', title: '从机写入', body: '本机令牌只用于本地节点。' }),
+  })
+  assert(slaveWrite.status === 201, 'slave writes to its own node with the local token')
+  slaveNode.setPeers([hostNode.url])
+  await slaveNode.syncNow()
+  const hostView = await (await fetch(hostNode.url + '/api/records?project=demo', { headers: { 'x-team-token': 'shared-secret' } })).json()
+  assert(hostView.records.some((record) => record.title === '从机写入'), 'member token syncs the slave record to the host')
+  assert(hostView.records.find((record) => record.title === '从机写入').author === 'bob', 'host derives the author from the member token')
+
   console.log('\nSMOKE OK')
 } catch (error) {
   console.error('\nSMOKE FAILED:', error && error.message)
@@ -173,6 +217,10 @@ try {
 } finally {
   if (A) await A.close()
   if (B) await B.close()
+  if (hostNode) await hostNode.close()
+  if (slaveNode) await slaveNode.close()
   fs.rmSync(dirA, { recursive: true, force: true })
   fs.rmSync(dirB, { recursive: true, force: true })
+  fs.rmSync(dirHost, { recursive: true, force: true })
+  fs.rmSync(dirSlave, { recursive: true, force: true })
 }

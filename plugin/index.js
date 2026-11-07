@@ -118,7 +118,7 @@ export function apply(ctx, config) {
     .filter((value, index, list) => list.indexOf(value) === index)
   // A host exposes its port so slaves can push; a slave only dials out.
   const exposed = cfg.expose === true || (peerList.length > 0 && !cfg.primary)
-  const advertiseHost = cfg.advertiseHost || (exposed ? lanAddress() : '127.0.0.1')
+  const advertiseHost = cfg.advertiseHost || lanAddress()
 
   let brief = ''
   const briefs = new Map()
@@ -135,6 +135,23 @@ export function apply(ctx, config) {
     return path.join(home, 'team-context', project)
   }
 
+  // The embedded node authenticates this machine's own plugin with a local
+  // secret; peers and the admin still use the shared/member token.
+  function readLocalSecret() {
+    const file = path.join(localDataDir(), 'local-token')
+    try {
+      const existing = fs.readFileSync(file, 'utf8').trim()
+      if (existing) return existing
+    } catch {
+      // generate below
+    }
+    const value = crypto.randomBytes(24).toString('base64url')
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, value)
+    return value
+  }
+  const localSecret = readLocalSecret()
+
   function ensureNode() {
     if (cfg.embedded === false) return Promise.resolve(null)
     if (node) return Promise.resolve(node)
@@ -144,7 +161,10 @@ export function apply(ctx, config) {
         dataDir: localDataDir(),
         host: exposed ? '0.0.0.0' : '127.0.0.1',
         port: Number(cfg.peerPort) || 7420,
-        token: cfg.token,
+        token: localSecret,
+        adminToken: cfg.adminToken || cfg.token,
+        peerToken: cfg.token,
+        localName: member,
         peers: peerList,
         advertiseHost,
         log: (line) => console.log('[team-context] ' + line),
@@ -339,7 +359,7 @@ export function apply(ctx, config) {
       signal,
       headers: {
         'content-type': 'application/json',
-        'x-team-token': cfg.token,
+        'x-team-token': localSecret,
         'x-team-member': member,
         ...(init.headers || {}),
       },
@@ -618,6 +638,8 @@ export function apply(ctx, config) {
             autoBrief: cfg.autoBrief !== false,
             briefLimit: Number(cfg.briefLimit) || 8,
             peers: Array.isArray(cfg.peers) ? cfg.peers : [],
+            advertise: node ? node.advertised : '',
+            node: node ? node.nodeId : '',
           })
         }
         if (req.method === 'POST') {
@@ -782,7 +804,7 @@ export function apply(ctx, config) {
         method: req.method,
         headers: {
           'content-type': req.headers['content-type'] || 'application/json',
-          'x-team-token': cfg.token,
+          'x-team-token': localSecret,
           'x-team-member': member,
         },
       }
