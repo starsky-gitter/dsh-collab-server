@@ -438,6 +438,16 @@ window.__ModuleLoader__.load({
         }
       }
 
+      async function unbindSession(sessionId) {
+        try {
+          await api('/zones', { method: 'DELETE', body: JSON.stringify({ sessionId }) })
+          await openZones()
+          setToast('已解除会话绑定')
+        } catch (e) {
+          setError(String((e && e.message) || e))
+        }
+      }
+
       async function unbindZone(cwd) {
         try {
           await api('/zones', { method: 'DELETE', body: JSON.stringify({ cwd }) })
@@ -861,6 +871,44 @@ window.__ModuleLoader__.load({
                   { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } },
                   '还没有绑定任何工作区。在会话 "..." 菜单里点「加入团队合作区」。',
                 ),
+            (zoneView.sessions || []).length
+              ? h(
+                  'div',
+                  { style: { marginTop: '14px' } },
+                  h('div', { className: 'dtc-label' }, '仅会话绑定'),
+                  h(
+                    'div',
+                    { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '6px' } },
+                    '这些会话没识别到工作区路径，只对当前会话生效；换新会话需要重新选。',
+                  ),
+                  zoneView.sessions.map((entry) =>
+                    h(
+                      'div',
+                      {
+                        key: entry.sessionId,
+                        style: {
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '8px 0',
+                          borderBottom: '1px solid var(--dsw-alias-border-l1)',
+                        },
+                      },
+                      h(
+                        'div',
+                        { style: { flex: 1, minWidth: 0 } },
+                        h('div', { style: { fontWeight: 500 } }, entry.project),
+                        h(
+                          'div',
+                          { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' } },
+                          '会话 ' + String(entry.sessionId).slice(0, 12) + '…',
+                        ),
+                      ),
+                      h('button', { className: 'dtc-btn', onClick: () => unbindSession(entry.sessionId) }, '解除'),
+                    ),
+                  ),
+                )
+              : null,
             h(
               'div',
               { style: { marginTop: '18px', paddingTop: '14px', borderTop: '1px solid var(--dsw-alias-border-l1)' } },

@@ -834,6 +834,7 @@ export function apply(ctx, config) {
           }
           return sendJson(res, 200, {
             zones: Object.entries(zones).map(([cwd, project]) => ({ cwd, project })),
+            sessions: Object.entries(sessionZones).map(([sessionId, project]) => ({ sessionId, project })),
             defaultProject: cfg.project,
             current,
           })
@@ -879,6 +880,12 @@ export function apply(ctx, config) {
             body = JSON.parse((await readRaw(req)) || '{}')
           } catch {
             body = {}
+          }
+          if (body.sessionId && sessionZones[body.sessionId]) {
+            delete sessionZones[body.sessionId]
+            saveSessionZones()
+            refreshBrief()
+            return sendJson(res, 200, { ok: true })
           }
           if (body.cwd && zones[body.cwd]) {
             delete zones[body.cwd]
