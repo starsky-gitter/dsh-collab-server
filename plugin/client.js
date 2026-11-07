@@ -1028,11 +1028,13 @@ window.__ModuleLoader__.load({
           : pending > 0
             ? 'var(--dsw-alias-state-warn-primary)'
             : 'var(--dsw-alias-state-success-primary)'
+      const peerError = (peer && peer.lastError) || (sync && sync.error) || ''
       const statusText = cfg
         ? (cfg.primary
             ? '主库 ' + cfg.primary
             : '本机 ' + ((sync && sync.advertise) || cfg.hubUrl || '')) +
-          (pending > 0 ? ' · 待同步 ' + pending : ' · 已同步') +
+          (pending > 0 ? ' · 待同步 ' + pending : connected ? ' · 已同步' : ' · 未连接') +
+          (connected ? '' : peerError ? ' · ' + String(peerError).slice(0, 48) : '') +
           ' · ' + cfg.project + ' · ' + cfg.member
         : '正在读取配置…'
 
@@ -1046,7 +1048,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dtc-title' }, '团队共享'),
           h(
             'div',
-            { className: 'dtc-sub', title: sync && sync.advertise ? '本机地址 ' + sync.advertise : '' },
+            { className: 'dtc-sub', title: peerError || (sync && sync.advertise ? '本机地址 ' + sync.advertise : '') },
             h('span', null, h('span', { className: 'dtc-dot', style: { background: dotColor } }), statusText),
           ),
           h('div', { className: 'dtc-spacer' }),
