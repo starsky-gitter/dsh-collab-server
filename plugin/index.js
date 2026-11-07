@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { startNode } from './core.js'
 
-export const name = 'dsh-collab-server'
+export const name = 'collab-server'
 
 export const inject = ['tools', 'webServer', 'systemPrompt', 'agents']
 
@@ -131,9 +131,18 @@ function ago(iso) {
 
 export function apply(ctx, config) {
   const cfg = { ...DEFAULTS, ...(config || {}) }
-  const settingsHome = cfg.dataDir || process.env.DSH_PROFILE_DIR || path.join(os.homedir(), '.dsh')
+  const stateHome = cfg.dataDir || process.env.DSH_PROFILE_DIR || path.join(os.homedir(), '.dsh')
+  if (!cfg.dataDir) {
+    try {
+      const legacy = path.join(stateHome, 'team-context')
+      const next = path.join(stateHome, 'collab-server')
+      if (!fs.existsSync(next) && fs.existsSync(legacy)) fs.renameSync(legacy, next)
+    } catch {
+      // a locked directory just keeps the old location
+    }
+  }
   const settingsProject = String(cfg.project || 'default').replace(/[^\w.-]+/g, '_')
-  const settingsFile = path.join(settingsHome, 'team-context', settingsProject, 'settings.json')
+  const settingsFile = path.join(stateHome, 'collab-server', settingsProject, 'settings.json')
   try {
     Object.assign(cfg, JSON.parse(fs.readFileSync(settingsFile, 'utf8')) || {})
   } catch {
@@ -160,7 +169,7 @@ export function apply(ctx, config) {
     if (cfg.dataDir) return cfg.dataDir
     const home = process.env.DSH_PROFILE_DIR || path.join(os.homedir(), '.dsh')
     const project = String(cfg.project || 'default').replace(/[^\w.-]+/g, '_')
-    return path.join(home, 'team-context', project)
+    return path.join(home, 'collab-server', project)
   }
 
   // The embedded node authenticates this machine's own plugin with a local
@@ -195,7 +204,7 @@ export function apply(ctx, config) {
         localName: member,
         peers: peerList,
         advertiseHost,
-        log: (line) => console.log('[dsh-collab-server] ' + line),
+        log: (line) => console.log('[collab-server] ' + line),
       })
         .then((started) => {
           node = started
@@ -203,7 +212,7 @@ export function apply(ctx, config) {
         })
         .catch((error) => {
           nodeFailed = true
-          console.error('[dsh-collab-server] embedded node failed, falling back to hubUrl:', error && error.message)
+          console.error('[collab-server] embedded node failed, falling back to hubUrl:', error && error.message)
           return null
         })
     }
@@ -469,7 +478,7 @@ export function apply(ctx, config) {
           }),
         )
       } catch (error) {
-        console.error('[dsh-collab-server] scoped brief failed:', error && error.message)
+        console.error('[collab-server] scoped brief failed:', error && error.message)
       }
     }),
   )
